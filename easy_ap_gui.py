@@ -389,8 +389,10 @@ class App(tk.Tk):
             try: os.chmod(za, 0o755)
             except Exception: pass
             if need_za and not (tools / 'zipalign').exists():
-                shutil.copy2(za, tools / 'zipalign'); os.chmod(tools / 'zipalign', 0o755)
-                self.log_msg(f'Installed zipalign to {tools / "zipalign"}')
+                wrapper = tools / 'zipalign'
+                wrapper.write_text(f'#!/usr/bin/env bash\nexec "{za}" "$@"\n', encoding='utf-8')
+                os.chmod(wrapper, 0o755)
+                self.log_msg(f'Installed zipalign wrapper to {wrapper}')
         aj = bt_root / 'lib' / 'apksigner.jar'
         if aj.exists() and need_apk and not (tools / 'lib' / 'apksigner.jar').exists():
             (tools / 'lib').mkdir(parents=True, exist_ok=True)
