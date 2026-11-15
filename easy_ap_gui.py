@@ -211,27 +211,30 @@ class App(tk.Tk):
             msg += "\n\nHow to fix:\n- " + "\n- ".join(hints)
         return RuntimeError(msg)
 
-    def run_cmd(self, cmd, cwd=None, env=None, check=True, capture=False):
+    def run_cmd(self, cmd, cwd=None, env=None, check=True, capture=False, timeout=None):
         self.log("$ " + " ".join(cmd))
-        if capture:
-            p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, text=True,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            out = p.stdout or ""
-            if out:
-                for line in out.splitlines():
-                    self.log(line)
-            if check and p.returncode != 0:
-                raise RuntimeError(f"Command failed (exit {p.returncode}): {' '.join(cmd)}\n{out.strip()}")
-            return out
-        proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None, env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        assert proc.stdout
-        for line in proc.stdout:
-            self.log(line.rstrip())
-        rc = proc.wait()
-        if check and rc != 0:
-            raise RuntimeError(f"Command failed (exit {rc}): {' '.join(cmd)}")
-        return ""
+        try:
+            if capture or timeout is not None:
+                p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+                out = p.stdout or ""
+                if out:
+                    for line in out.splitlines():
+                        self.log(line)
+                if check and p.returncode != 0:
+                    raise RuntimeError(f"Command failed (exit {p.returncode}): {' '.join(cmd)}\n{out.strip()}")
+                return out
+            proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            assert proc.stdout
+            for line in proc.stdout:
+                self.log(line.rstrip())
+            rc = proc.wait()
+            if check and rc != 0:
+                raise RuntimeError(f"Command failed (exit {rc}): {' '.join(cmd)}")
+            return ""
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Command timed out after {timeout}s: {' '.join(cmd)}")
 
     def download_file(self, url, dest: Path, label: str, overall_base=0, overall_span=0):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -592,15 +595,16 @@ class App(tk.Tk):
         total = len(apks)
 
         # Clean temp and push each APK with per-file progress
-        try:
-            subprocess.run((["adb"] + (["-s", self.selected_device] if self.selected_device and self.selected_device!="__retry__" else []) + ['shell','rm','-rf', remote_tmp]), timeout=30, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        except Exception as e:
-            self.log(f'Warning: could not clean temp dir on device ({e}), continuing...')
-        try:
-            self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
-        except Exception:
-            self._wait_for_device()
-            self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
+        for attempt in range(2):
+            try:
+                self.adb(['shell', 'rm', '-rf', remote_tmp], check=False, timeout=30)
+                self.adb(['shell', 'mkdir', '-p', remote_tmp], check=True, timeout=30)
+                break
+            except Exception as e:
+                self.log(f'Warning: device temp setup issue ({e}); retrying after reconnect...')
+                self._wait_for_device()
+        else:
+            self.adb(['shell', 'mkdir', '-p', remote_tmp], check=True, timeout=30)
         for i, apk in enumerate(apks, 1):
             size = apk.stat().st_size
             self.set_progress(step='Installing APKs on device', item=f'APK {i}/{total}: {apk.name}',
@@ -665,7 +669,7 @@ class App(tk.Tk):
                                            ["Check device storage space", "If a store version is installed, uninstall it and try again", "Make sure the device allows installing this app"])
         finally:
             try:
-                subprocess.run((["adb"] + (["-s", self.selected_device] if self.selected_device and self.selected_device!="__retry__" else []) + ['shell','rm','-rf', remote_tmp]), timeout=30, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                self.adb(['shell', 'rm', '-rf', remote_tmp], check=False, timeout=30)
             except Exception:
                 pass
 
