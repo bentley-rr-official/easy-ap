@@ -401,9 +401,17 @@ class App(tk.Tk):
         ndk_default = Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'
         env_ndk = os.environ.get('ANDROID_NDK')
         ndk_path = Path(env_ndk) if env_ndk else ndk_default
-        if ndk_path.exists():
+        clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++'
+        if clang.exists():
             os.environ['ANDROID_NDK'] = str(ndk_path)
+            self.log_msg(f'NDK OK: {ndk_path}')
             return
+        if ndk_path.exists():
+            self.log_msg(f'NDK directory exists but is incomplete, re-downloading: {ndk_path}')
+            try:
+                shutil.rmtree(ndk_path)
+            except Exception as e:
+                self.log_msg(f'Could not remove incomplete NDK: {e}')
         if platform.system().lower() != 'linux':
             self.log_msg('Automatic NDK bootstrap is currently implemented for Linux; install NDK r27c manually on this OS.')
             return
@@ -418,10 +426,15 @@ class App(tk.Tk):
         extracted = tmp / 'android-ndk-r27c'
         if not extracted.exists():
             dirs = [d for d in tmp.iterdir() if d.is_dir()]
-            if len(dirs)==1: extracted = dirs[0]
+            if dirs:
+                extracted = dirs[0]
+        if not extracted.exists():
+            raise RuntimeError('Could not locate extracted NDK directory')
         if ndk_path.exists(): shutil.rmtree(ndk_path)
         shutil.move(str(extracted), str(ndk_path))
         shutil.rmtree(tmp, ignore_errors=True)
+        try: z.unlink()
+        except Exception: pass
         os.environ['ANDROID_NDK'] = str(ndk_path)
         self.log_msg(f'NDK ready: {ndk_path}')
 
