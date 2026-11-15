@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import glob
 import platform
 import queue
 import shutil
@@ -292,6 +293,121 @@ class App(tk.Tk):
             base += ["-s", self.selected_device]
         return self.run_cmd(base + args, capture=capture, check=check)
 
+    # ---------- build env ----------
+    def find_tool(self, name):
+        p = shutil.which(name)
+        if p:
+            return Path(p)
+        candidates = []
+        home = Path.home()
+        sdk_roots = [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(home/'Android/Sdk'), '/usr/lib/android-sdk']
+        for root in sdk_roots:
+            if not root:
+                continue
+            r = Path(root)
+            candidates += list(r.glob(f'build-tools/*/{name}'))
+            candidates += list(r.glob(f'build-tools/*/{name}.exe'))
+            candidates += list(r.glob(f'cmdline-tools/latest/bin/{name}'))
+        for c in candidates:
+            if c.exists():
+                return c
+        return None
+
+    def ensure_lief(self):
+        try:
+            import lief  # noqa
+            self.log_msg('python lief: OK')
+            return True
+        except Exception:
+            self.log_msg('python lief not found, trying to install (pip --user)...')
+            try:
+                self.run_cmd([sys.executable, '-m', 'pip', 'install', '--user', 'lief'], check=False)
+            except Exception as e:
+                self.log_msg(f'lief install attempt failed: {e}')
+            try:
+                import lief  # noqa
+                self.log_msg('python lief: installed')
+                return True
+            except Exception:
+                self.log_msg('python lief still missing (install manually: pip install lief)')
+                return False
+
+    def prepare_build_env(self, patcher: Path):
+        self.set_step('Preparing build environment...')
+        self.set_progress(None, None, 'Checking build tools', 'indeterminate')
+        tools = patcher / 'tools'
+        tools.mkdir(parents=True, exist_ok=True)
+
+        # keystore
+        ks = tools / 'debug.keystore'
+        if not ks.exists():
+            if shutil.which('keytool'):
+                self.log_msg('Creating debug.keystore...')
+                mk = patcher / 'scripts' / 'make-keystore.sh'
+                if mk.exists():
+                    self.run_cmd(['bash', str(mk)], cwd=patcher, check=False)
+                else:
+                    self.run_cmd(['keytool','-genkeypair','-keystore',str(ks),'-alias','2025','-storepass','android','-keypass','android','-keyalg','RSA','-keysize','2048','-validity','36500','-dname','CN=2025, O=2025'], check=False)
+            else:
+                self.log_msg('keytool not found; cannot auto-create debug.keystore')
+
+        # zipalign/apksigner
+        za = self.find_tool('zipalign')
+        if za and not (tools / 'zipalign').exists():
+            try:
+                if za.is_file():
+                    shutil.copy2(za, tools / 'zipalign')
+                    os.chmod(tools / 'zipalign', 0o755)
+                    self.log_msg(f'Copied zipalign from {za}')
+            except Exception as e:
+                self.log_msg(f'Could not copy zipalign: {e}')
+        apks = self.find_tool('apksigner')
+        if apks and not (tools / 'apksigner').exists() and apks.suffix != '.jar':
+            try:
+                shutil.copy2(apks, tools / 'apksigner')
+                os.chmod(tools / 'apksigner', 0o755)
+                self.log_msg(f'Copied apksigner from {apks}')
+            except Exception:
+                pass
+        # apksigner.jar in build-tools lib
+        if not (tools / 'lib' / 'apksigner.jar').exists():
+            for root in [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(Path.home()/'Android/Sdk'), '/usr/lib/android-sdk']:
+                if not root: continue
+                jars = list(Path(root).glob('build-tools/*/lib/apksigner.jar'))
+                if jars:
+                    (tools / 'lib').mkdir(parents=True, exist_ok=True)
+                    try:
+                        shutil.copy2(jars[-1], tools / 'lib' / 'apksigner.jar')
+                        self.log_msg(f'Copied apksigner.jar from {jars[-1]}')
+                    except Exception:
+                        pass
+                    break
+
+        self.ensure_lief()
+
+        missing = []
+        if not shutil.which('java') and not shutil.which('java.exe'):
+            missing.append('java')
+        if not (tools / 'zipalign').exists() and not shutil.which('zipalign'):
+            missing.append('zipalign (Android build-tools)')
+        if not (tools / 'lib' / 'apksigner.jar').exists() and not (tools / 'apksigner').exists() and not shutil.which('apksigner'):
+            missing.append('apksigner (Android build-tools)')
+        if not (tools / 'debug.keystore').exists():
+            missing.append('tools/debug.keystore')
+        ndk = os.environ.get('ANDROID_NDK') or str(Path.home()/'x'/'ndk'/'android-ndk-r27c')
+        if not Path(ndk).exists():
+            missing.append(f'Android NDK r27c (expected at {ndk} or set ANDROID_NDK)')
+        try:
+            import lief  # noqa
+        except Exception:
+            missing.append('python lief')
+        if missing:
+            msg = 'Missing build dependencies:
+- ' + '
+- '.join(missing)
+            self.log_msg(msg)
+            self.log_msg('Attempting build anyway; install missing items if it fails.')
+
     # ---------- workflow ----------
     def start_auto(self):
         if self.running:
@@ -356,6 +472,7 @@ class App(tk.Tk):
             self.write_config(patcher, self.nameserver)
 
             # 4 build
+            self.prepare_build_env(patcher)
             self.set_step("Building...")
             self.set_progress(None, None, "Running build-phone.sh (this may take a while)", "indeterminate")
             env = os.environ.copy()
