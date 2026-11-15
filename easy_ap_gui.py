@@ -397,12 +397,34 @@ class App(tk.Tk):
             shutil.copy2(aj, tools / 'lib' / 'apksigner.jar')
             self.log_msg(f'Installed apksigner.jar to {tools / "lib" / "apksigner.jar"}')
 
-    def _fix_exec_perms(self, root: Path):
-        # Python zip extraction may drop executable bits; ensure toolchain binaries are runnable
+    def _fix_ndk_layout(self, root: Path):
+        # Python zip extraction can drop executable bits and turn symlinks into small text files.
         for p in root.rglob('*'):
             try:
+                if p.is_symlink():
+                    continue
                 if p.is_file():
-                    # make scripts/binaries in bin dirs executable
+                    # repair broken symlinks (small text file containing target path/name)
+                    if p.stat().st_size <= 4096 and ('/bin/' in str(p) or '/lib' in str(p) or '/prebuilt/' in str(p)):
+                        try:
+                            data = p.read_bytes()
+                            if b'\x00' in data:
+                                pass
+                            else:
+                                s = data.decode('utf-8', 'ignore').strip()
+                                if s and '\n' not in s and ' ' not in s and len(s) < 255:
+                                    target = (p.parent / s)
+                                    # common case: symlink stored as basename or relative path
+                                    if target.exists() or (p.parent / Path(s).name).exists():
+                                        try:
+                                            p.unlink()
+                                            os.symlink(s, p)
+                                            continue
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+                    # make scripts/binaries in bin/prebuilt dirs executable
                     if '/bin/' in str(p) or '/prebuilt/' in str(p):
                         mode = p.stat().st_mode
                         p.chmod(mode | 0o111)
@@ -414,13 +436,39 @@ class App(tk.Tk):
         env_ndk = os.environ.get('ANDROID_NDK')
         ndk_path = Path(env_ndk) if env_ndk else ndk_default
         clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++'
-        if clang.exists():
-            if not os.access(clang, os.X_OK):
-                self.log_msg(f'Fixing NDK executable permissions: {ndk_path}')
-                self._fix_exec_perms(ndk_path)
+        real_clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/clang'
+        ok = clang.exists() and os.access(clang, os.X_OK)
+        if ok and real_clang.exists() and not real_clang.is_symlink():
+            try:
+                # broken extracted symlink becomes tiny text file like "clang\n"
+                if real_clang.stat().st_size < 4096:
+                    txt = real_clang.read_bytes()
+                    if b'\x00' not in txt:
+                        ok = False
+            except Exception:
+                pass
+        if ok:
             os.environ['ANDROID_NDK'] = str(ndk_path)
             self.log_msg(f'NDK OK: {ndk_path}')
             return
+        if ndk_path.exists():
+            self.log_msg(f'Fixing or re-downloading NDK: {ndk_path}')
+            self._fix_ndk_layout(ndk_path)
+            # recheck after fix
+            ok2 = clang.exists() and os.access(clang, os.X_OK)
+            if ok2 and real_clang.exists():
+                try:
+                    if real_clang.is_symlink() or real_clang.stat().st_size > 4096:
+                        os.environ['ANDROID_NDK'] = str(ndk_path)
+                        self.log_msg(f'NDK OK after repair: {ndk_path}')
+                        return
+                except Exception:
+                    pass
+            self.log_msg(f'NDK still incomplete, re-downloading: {ndk_path}')
+            try:
+                shutil.rmtree(ndk_path)
+            except Exception as e:
+                self.log_msg(f'Could not remove incomplete NDK: {e}')
         if ndk_path.exists():
             self.log_msg(f'NDK directory exists but is incomplete, re-downloading: {ndk_path}')
             try:
@@ -450,7 +498,7 @@ class App(tk.Tk):
         shutil.rmtree(tmp, ignore_errors=True)
         try: z.unlink()
         except Exception: pass
-        self._fix_exec_perms(ndk_path)
+        self._fix_ndk_layout(ndk_path)
         os.environ['ANDROID_NDK'] = str(ndk_path)
         self.log_msg(f'NDK ready: {ndk_path}')
 
