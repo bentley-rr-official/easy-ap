@@ -1,57 +1,38 @@
 # easy-ap
 
-Simple GUI helper for downloading, building, installing, and pushing bundles for the **2025 Android Patcher**.
+Automated GUI helper for the **2025 Android Patcher**: downloads files, builds, installs APKs to a selected device, and pushes bundles.
 
 ## What it does
 
-The GUI asks for:
-- **Work directory** (where files are downloaded/built)
-- **Nameserver** (only this value is configured; written as `RecNet NameServer Host` in `2025.cfg`)
-- **Device package** (used for bundle push target, default `com.AgainstGravity.RecRoom`)
+On start (and via **Start / Restart**), the app runs automatically:
 
-Actions:
+1. **Prepares work directory** in the OS temp folder (`/tmp/easy-ap` on Linux/macOS, `%TEMP%\easy-ap` on Windows)
+2. **Downloads patcher (with progress)** from:  
+   `https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip`
+3. **Asks for nameserver** (after patcher download). Only this value is configured (`RecNet NameServer Host` in `2025.cfg`).
+4. **Downloads `base.xapk` (with progress)**:  
+   `curl` source: `https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t`
+5. **Downloads & extracts `bundles.zip` (with progress)**:  
+   `curl` source: `https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0`  
+   Bundles are extracted into `<workdir>/2025-android-patcher/bundles/`.
+6. **Builds** by writing `2025.cfg` (nameserver only) and running `scripts/build-phone.sh` on `base.xapk`.
+7. **Ensures `adb` is available** (attempts automatic installation if missing).
+8. **Device selection**: checks `adb devices`.
+   - If no devices are found: shows **"No devices found"** with a retry button.
+   - If one or more devices are found: shows buttons to **select a device**.
+9. **Installs APKs** to the selected device with per-APK progress.
+10. **Pushes bundles** to the selected device with per-file progress:  
+    `/sdcard/Android/data/com.AgainstGravity.RecRoom/files/AssetPackStubs/OutfitsAssetPack/`
 
-1. **Download patcher (zip)**  
-   Downloads and extracts:  
-   `https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip`  
-   into `<workdir>/2025-android-patcher`.
-
-2. **Download `base.xapk`**  
-   Downloads to `<workdir>/base.xapk` using:
-   ```bash
-   curl -L "https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t" -o base.xapk
-   ```
-
-3. **Download & extract bundles**  
-   Downloads `bundles.zip` to `<workdir>/bundles.zip` using:
-   ```bash
-   curl -L "https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0" -o bundles.zip
-   ```
-   Then extracts files into `<workdir>/2025-android-patcher/bundles/`.
-
-4. **Build**  
-   Writes `<workdir>/2025-android-patcher/2025.cfg` with the provided nameserver and runs:
-   ```bash
-   bash scripts/build-phone.sh <workdir>/base.xapk
-   ```
-
-5. **Install to phone**  
-   Runs `build/phone/signed/install.sh` if present (otherwise falls back to `adb install-multiple`).
-
-6. **Push bundles to phone**  
-   Pushes `*.bundle` files from `<workdir>/2025-android-patcher/bundles/` to:
-   ```text
-   /sdcard/Android/data/<package>/files/AssetPackStubs/OutfitsAssetPack/
-   ```
-
-You can run steps individually or use **Run all (1 → 6)**.
+Progress bars and logs are shown in the GUI throughout.
 
 ## Requirements
 
-- Python 3 + Tkinter (`python3-tk` on some Linux distros)
-- `curl`
-- `bash`, `unzip`, `adb` (for install/push)
-- Build dependencies required by the patcher (e.g. `java`, `python3` + `lief`, `zipalign`/`apksigner`, `tools/debug.keystore`, Android NDK r27c, etc. as described in the patcher repo)
+- Python 3 + Tkinter
+- `bash`, `curl`/network access (downloads use Python), `unzip` support (built-in Python `zipfile`)
+- **Build toolchain required by the patcher** on this machine (e.g. `java`, `python3` + `lief`, `zipalign`/`apksigner`, `tools/debug.keystore`, Android NDK r27c, etc.) — the build step will fail if dependencies are missing
+- USB debugging enabled and device connected for install/push steps
+- `adb` (auto-install is attempted if missing, but may require admin rights/package manager support)
 
 ## Run
 
@@ -61,6 +42,7 @@ python3 easy_ap_gui.py
 
 ## Notes
 
-- Enter the **nameserver** before building (step 4 requires it).
-- Build/install steps depend on your local toolchain and a connected ADB device; check the log panel for errors from underlying commands.
-- This tool downloads and runs external code/files; review sources and use at your own risk.
+- The app cleans/recreates its temp work directory on each run.
+- Large downloads and builds can take a long time; watch the progress and log panels.
+- Automatic `adb` installation is best-effort and platform-dependent; install Android platform-tools manually if needed.
+- Review downloaded code/files and use at your own risk.
