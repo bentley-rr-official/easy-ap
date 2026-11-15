@@ -883,21 +883,15 @@ Log Noisy Endpoints = false
         cmd = ["install-multiple", "-r"] + [str(a) for a in apks]
         try:
             self.adb(cmd)
-        except Exception as e:
-            err = str(e)
+        except Exception:
             self.log_msg("install-multiple failed, retrying with -d (allow downgrade)...")
             try:
                 self.adb(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
-            except Exception as e2:
-                err2 = str(e2)
-                # signature mismatch -> uninstall existing app then install fresh
-                if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in err or "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in err2 or "signatures do not match" in err2.lower():
-                    pkg = self._infer_package(apks)
-                    self.log_msg(f"Signature mismatch detected. Uninstalling existing package {pkg} and retrying...")
-                    self.adb(["uninstall", pkg], check=False)
-                    self.adb(["install-multiple"] + [str(a) for a in apks])
-                else:
-                    raise
+            except Exception:
+                pkg = self._infer_package(apks)
+                self.log_msg(f"Install still failed. Attempting uninstall of {pkg} (signature mismatch or incompatible install) and clean reinstall...")
+                self.adb(["uninstall", pkg], check=False)
+                self.adb(["install-multiple"] + [str(a) for a in apks])
         self.set_progress(100, 100, f"Installed {total} APK(s)", "determinate")
         self.log_msg(f"Installed {total} APK(s)")
 
