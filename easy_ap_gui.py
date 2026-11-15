@@ -865,13 +865,18 @@ Log Noisy Endpoints = false
     def install_apks(self, apks):
         self.set_step("Installing APKs...")
         total = len(apks)
-        # try install-multiple as a whole? better per-apk progress as requested
-        for i, apk in enumerate(apks, 1):
-            pct = int((i - 1) * 100 / total)
-            self.set_progress(pct, 100, f"Installing APK {i}/{total}: {apk.name}", "determinate")
-            self.adb(["install", "-r", str(apk)])
-            pct = int(i * 100 / total)
-            self.set_progress(pct, 100, f"Installed {i}/{total}: {apk.name}", "determinate")
+        if total == 0:
+            raise RuntimeError("No APKs to install")
+        # Split APKs must be installed together in one transaction
+        self.set_progress(0, 100, f"Installing {total} APK(s) (install-multiple)...", "determinate")
+        self.log_msg("Installing: " + ", ".join(a.name for a in apks))
+        try:
+            self.adb(["install-multiple", "-r"] + [str(a) for a in apks])
+        except Exception:
+            # retry with downgrade allowed for convenience
+            self.log_msg("install-multiple failed, retrying with -d (allow downgrade)...")
+            self.adb(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
+        self.set_progress(100, 100, f"Installed {total} APK(s)", "determinate")
         self.log_msg(f"Installed {total} APK(s)")
 
     def push_bundles(self, bundles_dir: Path):
