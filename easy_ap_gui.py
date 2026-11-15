@@ -357,11 +357,11 @@ class App(tk.Tk):
                 devices.append((serial, desc))
         return devices
 
-    def adb(self, args, capture=False, check=True):
+    def adb(self, args, capture=False, check=True, timeout=None):
         base = ["adb"]
         if self.selected_device and self.selected_device not in ("__retry__", None):
             base += ["-s", self.selected_device]
-        return self.run_cmd(base + args, capture=capture, check=check)
+        return self.run_cmd(base + args, capture=capture, check=check, timeout=timeout)
 
     def _wait_for_device(self, timeout=180):
         self.log("Waiting for device to reconnect...")
