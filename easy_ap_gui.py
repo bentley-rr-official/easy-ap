@@ -116,12 +116,22 @@ class App(tk.Tk):
                 elif kind == "progress":
                     _, value, maximum, sub, mode = item
                     if mode:
+                        cur = str(self.progress.cget("mode"))
+                        if cur == "indeterminate" and mode != "indeterminate":
+                            try:
+                                self.progress.stop()
+                            except Exception:
+                                pass
                         self.progress.configure(mode=mode)
+                        if mode == "indeterminate" and cur != "indeterminate":
+                            try:
+                                self.progress.start(10)
+                            except Exception:
+                                pass
                     if maximum is not None:
                         self.progress.configure(maximum=maximum)
-                    if value is not None:
-                        if self.progress.cget("mode") == "determinate":
-                            self.progress["value"] = value
+                    if value is not None and str(self.progress.cget("mode")) == "determinate":
+                        self.progress["value"] = value
                     if sub is not None:
                         self.sub_var.set(sub)
                 elif kind == "ask_nameserver":
