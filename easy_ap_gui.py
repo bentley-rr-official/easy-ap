@@ -397,12 +397,27 @@ class App(tk.Tk):
             shutil.copy2(aj, tools / 'lib' / 'apksigner.jar')
             self.log_msg(f'Installed apksigner.jar to {tools / "lib" / "apksigner.jar"}')
 
+    def _fix_exec_perms(self, root: Path):
+        # Python zip extraction may drop executable bits; ensure toolchain binaries are runnable
+        for p in root.rglob('*'):
+            try:
+                if p.is_file():
+                    # make scripts/binaries in bin dirs executable
+                    if '/bin/' in str(p) or '/prebuilt/' in str(p):
+                        mode = p.stat().st_mode
+                        p.chmod(mode | 0o111)
+            except Exception:
+                pass
+
     def bootstrap_ndk(self, wd: Path):
         ndk_default = Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'
         env_ndk = os.environ.get('ANDROID_NDK')
         ndk_path = Path(env_ndk) if env_ndk else ndk_default
         clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++'
         if clang.exists():
+            if not os.access(clang, os.X_OK):
+                self.log_msg(f'Fixing NDK executable permissions: {ndk_path}')
+                self._fix_exec_perms(ndk_path)
             os.environ['ANDROID_NDK'] = str(ndk_path)
             self.log_msg(f'NDK OK: {ndk_path}')
             return
@@ -435,6 +450,7 @@ class App(tk.Tk):
         shutil.rmtree(tmp, ignore_errors=True)
         try: z.unlink()
         except Exception: pass
+        self._fix_exec_perms(ndk_path)
         os.environ['ANDROID_NDK'] = str(ndk_path)
         self.log_msg(f'NDK ready: {ndk_path}')
 
