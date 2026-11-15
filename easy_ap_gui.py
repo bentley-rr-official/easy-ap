@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 import os
-import glob
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 PATCH_ZIP_URL = "https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip"
 XAPK_URL = "https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t"
@@ -21,155 +22,181 @@ DEFAULT_PACKAGE = "com.AgainstGravity.RecRoom"
 
 
 def default_workdir() -> Path:
-    base = Path(tempfile.gettempdir())
-    return base / "easy-ap"
+    return Path(tempfile.gettempdir()) / "easy-ap"
+
+
+def fmt_bytes(n: float) -> str:
+    for unit in ["B", "KB", "MB", "GB"]:
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("easy-ap")
-        self.geometry("980x760")
-        self.minsize(860, 640)
+        self.geometry("900x520")
+        self.minsize(760, 460)
 
         self.workdir = default_workdir()
         self.nameserver = ""
         self.package = DEFAULT_PACKAGE
-        self.log_queue: queue.Queue = queue.Queue()
-        self.ui_queue: queue.Queue = queue.Queue()
+        self.uiq: queue.Queue = queue.Queue()
         self.selected_device = None
         self.device_event = threading.Event()
         self.nameserver_event = threading.Event()
         self.running = False
 
         self._build_ui()
-        self.after(100, self._drain_queues)
-        self.after(300, self.start_auto)
+        self.after(100, self._drain_ui)
+        self.after(400, self.start_auto)
 
     # ---------- UI ----------
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 6}
-        header = ttk.Frame(self)
-        header.pack(fill="x", **pad)
-        ttk.Label(header, text="easy-ap", font=("TkDefaultFont", 14, "bold")).pack(anchor="w")
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(header, textvariable=self.status_var).pack(anchor="w")
-        ttk.Label(header, text=f"Work directory: {self.workdir}").pack(anchor="w")
+        root = ttk.Frame(self, padding=14)
+        root.pack(fill="both", expand=True)
 
-        progf = ttk.LabelFrame(self, text="Progress")
-        progf.pack(fill="x", **pad)
-        self.step_var = tk.StringVar(value="Waiting to start...")
-        ttk.Label(progf, textvariable=self.step_var).pack(anchor="w", padx=8, pady=(6, 2))
-        self.progress = ttk.Progressbar(progf, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", padx=8, pady=(0, 4))
-        self.sub_var = tk.StringVar(value="")
-        ttk.Label(progf, textvariable=self.sub_var).pack(anchor="w", padx=8, pady=(0, 6))
+        title = ttk.Label(root, text="easy-ap", font=("TkDefaultFont", 18, "bold"))
+        title.grid(row=0, column=0, sticky="w")
+        ttk.Label(root, text="Automatic patch, build, install, and bundle push", foreground="#555").grid(row=1, column=0, sticky="w", pady=(0, 10))
 
-        devf = ttk.LabelFrame(self, text="Device selection")
-        devf.pack(fill="x", **pad)
-        self.device_info_var = tk.StringVar(value="No device selection needed yet.")
-        ttk.Label(devf, textvariable=self.device_info_var).pack(anchor="w", padx=8, pady=4)
-        self.device_buttons_frame = ttk.Frame(devf)
-        self.device_buttons_frame.pack(fill="x", padx=8, pady=4)
+        # Status card
+        status_box = ttk.LabelFrame(root, text="Status", padding=10)
+        status_box.grid(row=2, column=0, sticky="ew")
+        self.status_var = tk.StringVar(value="Starting...")
+        self.step_var = tk.StringVar(value="Preparing")
+        ttk.Label(status_box, textvariable=self.status_var, font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(status_box, textvariable=self.step_var).grid(row=1, column=0, sticky="w", pady=(2, 8))
 
-        actions = ttk.Frame(self)
-        actions.pack(fill="x", **pad)
-        self.start_btn = ttk.Button(actions, text="Start / Restart", command=self.start_auto)
+        self.overall = ttk.Progressbar(status_box, mode="determinate", maximum=100)
+        self.overall.grid(row=2, column=0, sticky="ew")
+        self.overall_text = tk.StringVar(value="")
+        ttk.Label(status_box, textvariable=self.overall_text).grid(row=3, column=0, sticky="w", pady=(4, 0))
+
+        # Current item/file progress
+        item_box = ttk.LabelFrame(root, text="Current item", padding=10)
+        item_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.item_var = tk.StringVar(value="Waiting...")
+        ttk.Label(item_box, textvariable=self.item_var).grid(row=0, column=0, sticky="w")
+        self.item_progress = ttk.Progressbar(item_box, mode="determinate", maximum=100)
+        self.item_progress.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.item_detail = tk.StringVar(value="")
+        ttk.Label(item_box, textvariable=self.item_detail).grid(row=2, column=0, sticky="w", pady=(4, 0))
+
+        # Device
+        dev_box = ttk.LabelFrame(root, text="Device", padding=10)
+        dev_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self.device_info_var = tk.StringVar(value="No device action needed yet.")
+        ttk.Label(dev_box, textvariable=self.device_info_var).grid(row=0, column=0, sticky="w")
+        self.device_buttons_frame = ttk.Frame(dev_box)
+        self.device_buttons_frame.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        # Details / help
+        help_box = ttk.LabelFrame(root, text="Details", padding=10)
+        help_box.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
+        details = (
+            f"Work folder: {self.workdir}\n"
+            "• Downloads patcher, base.xapk, and bundles automatically\n"
+            "• You will be asked for the nameserver after the patcher downloads\n"
+            "• Build tools (NDK, build-tools, adb, keystore, Python deps) are bootstrapped when possible\n"
+            "• Detailed logs are printed in the terminal window"
+        )
+        ttk.Label(help_box, text=details, justify="left").grid(row=0, column=0, sticky="w")
+
+        btns = ttk.Frame(root)
+        btns.grid(row=6, column=0, sticky="w", pady=(10, 0))
+        self.start_btn = ttk.Button(btns, text="Start / Restart", command=self.start_auto)
         self.start_btn.pack(side="left")
 
-        logf = ttk.LabelFrame(self, text="Log")
-        logf.pack(fill="both", expand=True, **pad)
-        self.log = scrolledtext.ScrolledText(logf, height=20, wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True, padx=6, pady=6)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(5, weight=1)
+        status_box.columnconfigure(0, weight=1)
+        item_box.columnconfigure(0, weight=1)
+        dev_box.columnconfigure(0, weight=1)
+        help_box.columnconfigure(0, weight=1)
 
-    def log_msg(self, msg: str):
-        self.log_queue.put(("log", msg))
+    def log(self, msg: str):
+        # Terminal logging (not UI)
+        print(msg, flush=True)
 
-    def set_status(self, msg: str):
-        self.log_queue.put(("status", msg))
+    def ui(self, fn, *args):
+        self.uiq.put((fn, args))
 
-    def set_step(self, msg: str):
-        self.log_queue.put(("step", msg))
-
-    def set_progress(self, value=None, maximum=None, sub=None, mode=None):
-        self.log_queue.put(("progress", value, maximum, sub, mode))
-
-    def ask_nameserver_ui(self):
-        self.log_queue.put(("ask_nameserver", None))
-
-    def ask_device_ui(self, devices):
-        self.log_queue.put(("ask_device", devices))
-
-    def _drain_queues(self):
+    def _drain_ui(self):
         try:
             while True:
-                item = self.log_queue.get_nowait()
-                kind = item[0]
-                if kind == "log":
-                    self.log.configure(state="normal")
-                    self.log.insert("end", item[1] + "\n")
-                    self.log.see("end")
-                    self.log.configure(state="disabled")
-                elif kind == "status":
-                    self.status_var.set(item[1])
-                elif kind == "step":
-                    self.step_var.set(item[1])
-                elif kind == "progress":
-                    _, value, maximum, sub, mode = item
-                    if mode:
-                        cur = str(self.progress.cget("mode"))
-                        if cur == "indeterminate" and mode != "indeterminate":
-                            try:
-                                self.progress.stop()
-                            except Exception:
-                                pass
-                        self.progress.configure(mode=mode)
-                        if mode == "indeterminate" and cur != "indeterminate":
-                            try:
-                                self.progress.start(10)
-                            except Exception:
-                                pass
-                    if maximum is not None:
-                        self.progress.configure(maximum=maximum)
-                    if value is not None and str(self.progress.cget("mode")) == "determinate":
-                        self.progress["value"] = value
-                    if sub is not None:
-                        self.sub_var.set(sub)
-                elif kind == "ask_nameserver":
-                    self._prompt_nameserver()
-                elif kind == "ask_device":
-                    self._show_device_buttons(item[1])
+                fn, args = self.uiq.get_nowait()
+                try:
+                    fn(*args)
+                except Exception:
+                    pass
         except queue.Empty:
             pass
-        self.after(100, self._drain_queues)
+        self.after(100, self._drain_ui)
 
-    def _prompt_nameserver(self):
-        # Called on UI thread
-        ns = simpledialog.askstring("Nameserver", "Enter nameserver (RecNet NameServer Host):", parent=self)
-        if ns and ns.strip():
-            self.nameserver = ns.strip()
-        else:
-            self.nameserver = ""
-        self.nameserver_event.set()
+    def _set_status(self, status=None, step=None, overall=None, overall_mode=None, overall_text=None,
+                    item=None, item_value=None, item_mode=None, item_detail=None):
+        if status is not None: self.status_var.set(status)
+        if step is not None: self.step_var.set(step)
+        if overall_mode is not None:
+            cur = str(self.overall.cget('mode'))
+            if cur == 'indeterminate' and overall_mode != 'indeterminate':
+                try: self.overall.stop()
+                except Exception: pass
+            self.overall.configure(mode=overall_mode)
+            if overall_mode == 'indeterminate' and cur != 'indeterminate':
+                try: self.overall.start(10)
+                except Exception: pass
+        if overall is not None and str(self.overall.cget('mode')) == 'determinate':
+            self.overall['value'] = max(0, min(100, overall))
+        if overall_text is not None: self.overall_text.set(overall_text)
 
-    def _show_device_buttons(self, devices):
-        for w in self.device_buttons_frame.winfo_children():
-            w.destroy()
-        self.selected_device = None
-        self.device_event.clear()
-        if not devices:
-            self.device_info_var.set("No devices found. Connect your phone with USB debugging enabled and click Retry.")
-            ttk.Button(self.device_buttons_frame, text="Retry device check", command=self._retry_devices).pack(side="left", padx=4, pady=4)
-            return
-        self.device_info_var.set("Select a device to install/push to:")
-        for serial, desc in devices:
-            txt = f"{serial}" + (f" ({desc})" if desc else "")
-            ttk.Button(self.device_buttons_frame, text=txt, command=lambda s=serial: self._select_device(s)).pack(side="left", padx=4, pady=4)
+        if item is not None: self.item_var.set(item)
+        if item_mode is not None:
+            cur = str(self.item_progress.cget('mode'))
+            if cur == 'indeterminate' and item_mode != 'indeterminate':
+                try: self.item_progress.stop()
+                except Exception: pass
+            self.item_progress.configure(mode=item_mode)
+            if item_mode == 'indeterminate' and cur != 'indeterminate':
+                try: self.item_progress.start(10)
+                except Exception: pass
+        if item_value is not None and str(self.item_progress.cget('mode')) == 'determinate':
+            self.item_progress['value'] = max(0, min(100, item_value))
+        if item_detail is not None: self.item_detail.set(item_detail)
+
+    def set_progress(self, **kw):
+        self.ui(lambda: self._set_status(**kw))
+
+    # ---------- dialogs / device selection ----------
+    def ask_nameserver_ui(self):
+        def _do():
+            ns = simpledialog.askstring("Nameserver required", "Enter nameserver (RecNet NameServer Host):", parent=self)
+            self.nameserver = (ns or "").strip()
+            self.nameserver_event.set()
+        self.ui(_do)
+
+    def show_devices_ui(self, devices):
+        def _do():
+            for w in self.device_buttons_frame.winfo_children():
+                w.destroy()
+            self.selected_device = None
+            self.device_event.clear()
+            if not devices:
+                self.device_info_var.set("No devices found. Connect your phone (USB debugging on), unlock it, then click Retry.")
+                ttk.Button(self.device_buttons_frame, text="Retry device check", command=self._retry_devices).pack(side="left")
+                return
+            self.device_info_var.set("Select a device:")
+            for serial, desc in devices:
+                label = serial + (f" — {desc}" if desc else "")
+                ttk.Button(self.device_buttons_frame, text=label, command=lambda s=serial: self._select_device(s)).pack(side="left", padx=4)
+        self.ui(_do)
 
     def _retry_devices(self):
-        # trigger recheck by setting event with no selection? handled in worker loop
-        self.device_info_var.set("Retrying device detection...")
         self.selected_device = "__retry__"
+        self.device_info_var.set("Checking for devices...")
         self.device_event.set()
 
     def _select_device(self, serial):
@@ -177,66 +204,80 @@ class App(tk.Tk):
         self.device_info_var.set(f"Selected device: {serial}")
         self.device_event.set()
 
-    # ---------- helpers ----------
+    # ---------- command/download helpers ----------
+    def human_error(self, title: str, detail: str, hints=None) -> RuntimeError:
+        msg = f"{title}\n\nWhat happened:\n{detail}"
+        if hints:
+            msg += "\n\nHow to fix:\n- " + "\n- ".join(hints)
+        return RuntimeError(msg)
+
     def run_cmd(self, cmd, cwd=None, env=None, check=True, capture=False):
-        self.log_msg("$ " + " ".join(cmd))
+        self.log("$ " + " ".join(cmd))
         if capture:
             p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            if p.stdout:
-                for line in p.stdout.splitlines():
-                    self.log_msg(line)
+            out = p.stdout or ""
+            if out:
+                for line in out.splitlines():
+                    self.log(line)
             if check and p.returncode != 0:
-                raise RuntimeError(f"Command failed ({p.returncode}): {' '.join(cmd)}")
-            return p.stdout or ""
+                raise RuntimeError(f"Command failed (exit {p.returncode}): {' '.join(cmd)}\n{out.strip()}")
+            return out
         proc = subprocess.Popen(cmd, cwd=str(cwd) if cwd else None, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         assert proc.stdout
         for line in proc.stdout:
-            self.log_msg(line.rstrip())
+            self.log(line.rstrip())
         rc = proc.wait()
         if check and rc != 0:
-            raise RuntimeError(f"Command failed ({rc}): {' '.join(cmd)}")
+            raise RuntimeError(f"Command failed (exit {rc}): {' '.join(cmd)}")
         return ""
 
-    def download_file(self, url, dest: Path, label: str):
+    def download_file(self, url, dest: Path, label: str, overall_base=0, overall_span=0):
         dest.parent.mkdir(parents=True, exist_ok=True)
-        self.set_step(label)
-        self.set_progress(0, 100, f"Starting download: {dest.name}", "determinate")
+        self.set_progress(step=label, item=f"Downloading {dest.name}", item_mode="determinate", item_value=0, item_detail="Starting...")
 
         def hook(block_num, block_size, total_size):
             downloaded = block_num * block_size
             if total_size > 0:
                 pct = min(100, int(downloaded * 100 / total_size))
-                mb = downloaded / (1024 * 1024)
-                tmb = total_size / (1024 * 1024)
-                self.set_progress(pct, 100, f"{dest.name}: {mb:.1f}/{tmb:.1f} MB ({pct}%)", "determinate")
+                detail = f"{fmt_bytes(downloaded)} / {fmt_bytes(total_size)} ({pct}%)"
+                self.set_progress(item_value=pct, item_mode="determinate", item_detail=detail,
+                                  overall=overall_base + int(pct * overall_span / 100) if overall_span else None)
             else:
-                mb = downloaded / (1024 * 1024)
-                self.set_progress(None, None, f"{dest.name}: {mb:.1f} MB downloaded", "indeterminate")
+                self.set_progress(item_mode="indeterminate", item_detail=f"{fmt_bytes(downloaded)} downloaded")
 
-        urllib.request.urlretrieve(url, dest, reporthook=hook)
-        self.set_progress(100, 100, f"Downloaded {dest.name}", "determinate")
+        try:
+            urllib.request.urlretrieve(url, dest, reporthook=hook)
+        except Exception as e:
+            raise self.human_error(
+                f"Download failed: {dest.name}",
+                str(e),
+                ["Check your internet connection", "Try again (downloads can fail temporarily)", "If using a VPN/firewall, allow access to GitHub/Google Drive"]
+            )
+        self.set_progress(item_value=100, item_mode="determinate", item_detail=f"Downloaded {fmt_bytes(dest.stat().st_size)}",
+                          overall=overall_base + overall_span if overall_span else None)
 
     def extract_zip(self, zip_path: Path, dest_dir: Path, label: str):
-        self.set_step(label)
+        self.set_progress(step=label, item=f"Extracting {zip_path.name}", item_mode="determinate", item_value=0, item_detail="Starting...")
         dest_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            infos = [i for i in zf.infolist() if not i.is_dir()]
-            total = max(1, len(infos))
-            for idx, info in enumerate(infos, 1):
-                zf.extract(info, dest_dir)
-                pct = int(idx * 100 / total)
-                self.set_progress(pct, 100, f"Extracting {idx}/{total}: {Path(info.filename).name}", "determinate")
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                infos = [i for i in zf.infolist() if not i.is_dir()]
+                total = max(1, len(infos))
+                for idx, info in enumerate(infos, 1):
+                    zf.extract(info, dest_dir)
+                    pct = int(idx * 100 / total)
+                    self.set_progress(item_value=pct, item_mode="determinate", item_detail=f"{idx}/{total}: {Path(info.filename).name}")
+        except Exception as e:
+            raise self.human_error(f"Failed to extract {zip_path.name}", str(e), ["The download may be corrupted; restart to re-download", "Ensure you have enough disk space in the temp folder"])
 
-    # ---------- adb ----------
+    # ---------- adb / devices ----------
     def ensure_adb(self):
-        self.set_step("Checking adb...")
-        self.set_progress(None, None, "Looking for adb", "indeterminate")
+        self.set_progress(step="Preparing device tools (adb)", item="Checking adb", item_mode="indeterminate", item_detail="")
         if shutil.which("adb"):
-            self.log_msg("adb found: " + shutil.which("adb"))
+            self.log("adb found: " + shutil.which("adb"))
             return
-        # check common locations
         candidates = []
         home = Path.home()
         candidates += [self.workdir / 'platform-tools' / ('adb.exe' if os.name=='nt' else 'adb'),
@@ -248,89 +289,56 @@ class App(tk.Tk):
             if c.exists():
                 os.environ["PATH"] = str(c.parent) + os.pathsep + os.environ.get("PATH", "")
                 if shutil.which("adb"):
-                    self.log_msg("adb found: " + shutil.which("adb"))
+                    self.log("adb found: " + shutil.which("adb"))
                     return
-        self.log_msg("adb not found, attempting to install...")
-        self.install_adb()
+        self.log("adb not found, downloading platform-tools...")
+        self._bootstrap_platform_tools()
+        for c in candidates:
+            if c.exists():
+                os.environ["PATH"] = str(c.parent) + os.pathsep + os.environ.get("PATH", "")
         if not shutil.which("adb"):
-            # recheck
-            for c in candidates:
-                if c.exists():
-                    os.environ["PATH"] = str(c.parent) + os.pathsep + os.environ.get("PATH", "")
-                    break
-        if not shutil.which("adb"):
-            raise RuntimeError("adb is not installed and automatic installation failed. Please install Android platform-tools (adb) and restart.")
-        self.log_msg("adb ready: " + shutil.which("adb"))
+            raise self.human_error(
+                "ADB (Android platform-tools) is not available",
+                "adb could not be found or installed automatically.",
+                ["Install Android platform-tools manually from Google", "Reconnect/restart and try again", "On Linux, you can also install your distro's android-tools package"]
+            )
+        self.log("adb ready: " + shutil.which("adb"))
 
     def _bootstrap_platform_tools(self):
         system = platform.system().lower()
         wd = self.workdir
         if system == 'linux':
             url = 'https://dl.google.com/android/repository/platform-tools-latest-linux.zip'
-            folder = 'platform-tools'
         elif system == 'darwin':
             url = 'https://dl.google.com/android/repository/platform-tools-latest-darwin.zip'
-            folder = 'platform-tools'
         elif system == 'windows':
             url = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip'
-            folder = 'platform-tools'
         else:
-            return False
-        dest = wd / folder
+            raise self.human_error("Unsupported OS for automatic adb install", system, ["Install Android platform-tools manually"])
+        dest = wd / 'platform-tools'
         adb_name = 'adb.exe' if system == 'windows' else 'adb'
         if (dest / adb_name).exists():
             os.environ['PATH'] = str(dest) + os.pathsep + os.environ.get('PATH', '')
-            return True
-        try:
-            z = wd / 'platform-tools.zip'
-            self.download_file(url, z, 'Downloading Android platform-tools (adb)...')
-            tmp = wd / 'pt_extract'
-            if tmp.exists(): shutil.rmtree(tmp)
-            self.extract_zip(z, tmp, 'Extracting platform-tools...')
-            src = tmp / 'platform-tools'
-            if not src.exists():
-                dirs = [d for d in tmp.iterdir() if d.is_dir()]
-                if dirs: src = dirs[0]
-            if dest.exists(): shutil.rmtree(dest)
-            shutil.move(str(src), str(dest))
-            shutil.rmtree(tmp, ignore_errors=True)
-            try: z.unlink()
+            return
+        z = wd / 'platform-tools.zip'
+        self.download_file(url, z, 'Downloading Android platform-tools (adb)...')
+        tmp = wd / 'pt_extract'
+        if tmp.exists(): shutil.rmtree(tmp)
+        self.extract_zip(z, tmp, 'Extracting platform-tools...')
+        src = tmp / 'platform-tools'
+        if not src.exists():
+            dirs = [d for d in tmp.iterdir() if d.is_dir()]
+            src = dirs[0] if dirs else src
+        if dest.exists(): shutil.rmtree(dest)
+        shutil.move(str(src), str(dest))
+        shutil.rmtree(tmp, ignore_errors=True)
+        try: z.unlink()
+        except Exception: pass
+        adb_path = dest / adb_name
+        if adb_path.exists() and system != 'windows':
+            try: os.chmod(adb_path, adb_path.stat().st_mode | 0o111)
             except Exception: pass
-            adb_path = dest / adb_name
-            if adb_path.exists() and system != 'windows':
-                try: os.chmod(adb_path, adb_path.stat().st_mode | 0o111)
-                except Exception: pass
-            os.environ['PATH'] = str(dest) + os.pathsep + os.environ.get('PATH', '')
-            return (dest / adb_name).exists() or shutil.which('adb') is not None
-        except Exception as e:
-            self.log_msg(f'Platform-tools download failed: {e}')
-            return False
-
-    def install_adb(self):
-        # Prefer downloading platform-tools (no sudo/password prompts)
-        try:
-            if self._bootstrap_platform_tools():
-                return
-        except Exception as e:
-            self.log_msg(f'Platform-tools bootstrap error: {e}')
-        system = platform.system().lower()
-        try:
-            if system == "linux":
-                if shutil.which("apt-get"):
-                    self.run_cmd(["sudo", "-n", "apt-get", "update"], check=False)
-                    self.run_cmd(["sudo", "-n", "apt-get", "install", "-y", "adb"], check=False)
-                elif shutil.which("dnf"):
-                    self.run_cmd(["sudo", "-n", "dnf", "install", "-y", "android-tools"], check=False)
-                elif shutil.which("pacman"):
-                    self.run_cmd(["sudo", "-n", "pacman", "-S", "--noconfirm", "android-tools"], check=False)
-            elif system == "darwin":
-                if shutil.which("brew"):
-                    self.run_cmd(["brew", "install", "android-platform-tools"], check=False)
-            elif system == "windows":
-                if shutil.which("winget"):
-                    self.run_cmd(["winget", "install", "-e", "--id", "Google.PlatformTools"], check=False)
-        except Exception as e:
-            self.log_msg(f"Automatic adb install attempt error: {e}")
+        os.environ['PATH'] = str(dest) + os.pathsep + os.environ.get('PATH', '')
 
     def get_adb_devices(self):
         out = self.run_cmd(["adb", "devices", "-l"], capture=True, check=False)
@@ -342,77 +350,74 @@ class App(tk.Tk):
             parts = line.split()
             if len(parts) >= 2 and parts[1] == "device":
                 serial = parts[0]
-                desc = " ".join(parts[2:]) if len(parts) > 2 else ""
+                desc = " ".join(parts[2:])
                 devices.append((serial, desc))
         return devices
 
     def adb(self, args, capture=False, check=True):
         base = ["adb"]
-        if self.selected_device and self.selected_device != "__retry__":
+        if self.selected_device and self.selected_device not in ("__retry__", None):
             base += ["-s", self.selected_device]
         return self.run_cmd(base + args, capture=capture, check=check)
 
-    # ---------- build env ----------
-    def ensure_java(self):
-        if shutil.which('java'):
-            return True
-        self.log_msg('Java not found, attempting to install...')
-        system = platform.system().lower()
-        try:
-            if system == 'linux':
-                if shutil.which('apt-get'):
-                    self.run_cmd(['sudo','apt-get','update'], check=False)
-                    self.run_cmd(['sudo','apt-get','install','-y','openjdk-17-jre-headless'], check=False)
-                elif shutil.which('dnf'):
-                    self.run_cmd(['sudo','dnf','install','-y','java-17-openjdk-headless'], check=False)
-                elif shutil.which('pacman'):
-                    self.run_cmd(['sudo','pacman','-S','--noconfirm','jre17-openjdk-headless'], check=False)
-            elif system == 'darwin' and shutil.which('brew'):
-                self.run_cmd(['brew','install','openjdk@17'], check=False)
-            elif system == 'windows' and shutil.which('winget'):
-                self.run_cmd(['winget','install','-e','--id','EclipseAdoptium.Temurin.17.JRE'], check=False)
-        except Exception as e:
-            self.log_msg(f'Java install attempt failed: {e}')
-        return bool(shutil.which('java'))
+    def _wait_for_device(self, timeout=180):
+        self.log("Waiting for device to reconnect...")
+        end = time.time() + timeout
+        while time.time() < end:
+            devs = self.get_adb_devices()
+            if devs:
+                serials = [d[0] for d in devs]
+                if self.selected_device in serials:
+                    return
+                if len(devs) == 1:
+                    self.selected_device = devs[0][0]
+                    self.ui(lambda s=self.selected_device: self.device_info_var.set(f"Selected device: {s}"))
+                    return
+                return
+            time.sleep(2)
+        raise self.human_error("Device disconnected", "The selected device did not reconnect in time.",
+                               ["Check USB cable/connection", "Unlock the phone and allow USB debugging", "Run again once the device is connected"])
+
+    # ---------- build env (reuse previous bootstraps, simplified) ----------
+    def find_tool(self, name):
+        p = shutil.which(name)
+        if p: return Path(p)
+        home = Path.home()
+        roots = [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(home/'Android/Sdk'), str(self.workdir/'android-sdk'), '/usr/lib/android-sdk']
+        for root in roots:
+            if not root: continue
+            r = Path(root)
+            for c in list(r.glob(f'build-tools/*/{name}')) + list(r.glob(f'build-tools/*/lib/{name}')):
+                if c.exists(): return c
+        return None
 
     def ensure_python_deps_env(self, wd: Path):
-        """Create/use a venv in workdir so pip installs work on externally-managed systems."""
         venv = wd / 'venv'
         py = venv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-        pip = venv / ('Scripts/pip.exe' if os.name == 'nt' else 'bin/pip')
         if not py.exists():
-            self.log_msg('Creating Python virtual environment for build dependencies...')
-            self.run_cmd([sys.executable, '-m', 'venv', str(venv)], check=True)
-        # install lief
+            self.log('Creating Python virtual environment for build dependencies...')
+            self.run_cmd([sys.executable, '-m', 'venv', str(venv)])
         try:
             self.run_cmd([str(py), '-c', 'import lief'], check=True, capture=True)
-            self.log_msg('python lief (venv): OK')
         except Exception:
-            self.log_msg('Installing lief in venv...')
+            self.log('Installing lief in venv...')
             self.run_cmd([str(py), '-m', 'pip', 'install', '--upgrade', 'pip'], check=False)
             self.run_cmd([str(py), '-m', 'pip', 'install', 'lief'], check=False)
-        # prepend venv bin to PATH for subsequent commands
         bin_dir = str(venv / ('Scripts' if os.name == 'nt' else 'bin'))
         os.environ['PATH'] = bin_dir + os.pathsep + os.environ.get('PATH', '')
-        self.log_msg(f'Using Python env: {bin_dir}')
 
     def bootstrap_android_tools(self, patcher: Path, wd: Path):
         tools = patcher / 'tools'
         tools.mkdir(parents=True, exist_ok=True)
         need_za = not ((tools / 'zipalign').exists() or shutil.which('zipalign'))
-        need_apk = not ((tools / 'lib' / 'apksigner.jar').exists() or shutil.which('apksigner') or (tools / 'apksigner').exists())
-        if not (need_za or need_apk):
+        need_apk = not ((tools / 'lib' / 'apksigner.jar').exists() or shutil.which('apksigner'))
+        if not (need_za or need_apk): return
+        if platform.system().lower() != 'linux':
             return
-        system = platform.system().lower()
-        if system != 'linux':
-            self.log_msg('Automatic Android build-tools bootstrap is currently implemented for Linux; please install Android SDK build-tools manually on this OS.')
-            return
-        # Download build-tools zip directly (simpler and no sdkmanager/license hassles)
         bt_root = wd / 'android-build-tools'
         urls = [
             'https://dl.google.com/android/repository/build-tools_r34-linux.zip',
             'https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip',
-            'https://dl.google.com/android/repository/34.0.0-linux.zip',
         ]
         z = wd / 'build-tools-linux.zip'
         if not bt_root.exists():
@@ -423,11 +428,9 @@ class App(tk.Tk):
                     tmp = wd / 'bt_extract'
                     if tmp.exists(): shutil.rmtree(tmp)
                     self.extract_zip(z, tmp, 'Extracting Android build-tools...')
-                    # zip usually contains android-14/, android-upsidedowncake/, or similar folder
-                    candidates = list(tmp.glob('android-*')) + list(tmp.glob('build-tools*')) + [d for d in tmp.iterdir() if d.is_dir()]
+                    candidates = list(tmp.glob('android-*')) + [d for d in tmp.iterdir() if d.is_dir()]
                     src = candidates[0] if candidates else None
-                    if not src or not src.exists():
-                        raise RuntimeError('Could not locate extracted build-tools directory')
+                    if not src: raise RuntimeError('Could not locate extracted build-tools directory')
                     if bt_root.exists(): shutil.rmtree(bt_root)
                     shutil.move(str(src), str(bt_root))
                     shutil.rmtree(tmp, ignore_errors=True)
@@ -437,123 +440,76 @@ class App(tk.Tk):
                     break
                 except Exception as e:
                     last_err = e
-                    self.log_msg(f'Build-tools download failed from {url}: {e}')
-                    try:
-                        if z.exists(): z.unlink()
-                    except Exception: pass
-            if last_err:
-                raise last_err
+            if last_err: raise last_err
         za = bt_root / 'zipalign'
-        if za.exists():
+        if za.exists() and need_za and not (tools / 'zipalign').exists():
             try: os.chmod(za, 0o755)
             except Exception: pass
-            if need_za and not (tools / 'zipalign').exists():
-                wrapper = tools / 'zipalign'
-                wrapper.write_text(f'#!/usr/bin/env bash\nexec "{za}" "$@"\n', encoding='utf-8')
-                os.chmod(wrapper, 0o755)
-                self.log_msg(f'Installed zipalign wrapper to {wrapper}')
+            wrapper = tools / 'zipalign'
+            wrapper.write_text(f'#!/usr/bin/env bash\nexec "{za}" "$@"\n', encoding='utf-8')
+            os.chmod(wrapper, 0o755)
         aj = bt_root / 'lib' / 'apksigner.jar'
         if aj.exists() and need_apk and not (tools / 'lib' / 'apksigner.jar').exists():
             (tools / 'lib').mkdir(parents=True, exist_ok=True)
             shutil.copy2(aj, tools / 'lib' / 'apksigner.jar')
-            self.log_msg(f'Installed apksigner.jar to {tools / "lib" / "apksigner.jar"}')
 
     def _fix_ndk_layout(self, root: Path):
-        # Python zip extraction can drop executable bits and turn symlinks into small text files.
         for p in root.rglob('*'):
             try:
-                if p.is_symlink():
+                if p.is_symlink() or not p.is_file():
                     continue
-                if p.is_file():
-                    # repair broken symlinks (small text file containing target path/name)
-                    if p.stat().st_size <= 4096 and ('/bin/' in str(p) or '/lib' in str(p) or '/prebuilt/' in str(p)):
-                        try:
-                            data = p.read_bytes()
-                            if b'\x00' in data:
-                                pass
-                            else:
-                                s = data.decode('utf-8', 'ignore').strip()
-                                if s and '\n' not in s and ' ' not in s and len(s) < 255:
-                                    target = (p.parent / s)
-                                    # common case: symlink stored as basename or relative path
-                                    if target.exists() or (p.parent / Path(s).name).exists():
-                                        try:
-                                            p.unlink()
-                                            os.symlink(s, p)
-                                            continue
-                                        except Exception:
-                                            pass
-                        except Exception:
-                            pass
-                    # make scripts/binaries in bin/prebuilt dirs executable
-                    if '/bin/' in str(p) or '/prebuilt/' in str(p):
-                        mode = p.stat().st_mode
-                        p.chmod(mode | 0o111)
+                sp = str(p)
+                if ('/bin/' in sp or '/prebuilt/' in sp or '/lib' in sp) and p.stat().st_size <= 4096:
+                    try:
+                        data = p.read_bytes()
+                        if b'\x00' not in data:
+                            s = data.decode('utf-8', 'ignore').strip()
+                            if s and '\n' not in s and ' ' not in s and len(s) < 255:
+                                target = p.parent / s
+                                if target.exists() or (p.parent / Path(s).name).exists():
+                                    try:
+                                        p.unlink(); os.symlink(s, p); continue
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                if '/bin/' in sp or '/prebuilt/' in sp:
+                    p.chmod(p.stat().st_mode | 0o111)
             except Exception:
                 pass
 
     def bootstrap_ndk(self, wd: Path):
-        ndk_default = Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'
-        env_ndk = os.environ.get('ANDROID_NDK')
-        ndk_path = Path(env_ndk) if env_ndk else ndk_default
+        ndk_path = Path(os.environ.get('ANDROID_NDK') or (Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'))
         clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++'
         real_clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/clang'
-        ok = clang.exists() and os.access(clang, os.X_OK)
-        if ok and real_clang.exists() and not real_clang.is_symlink():
-            try:
-                # broken extracted symlink becomes tiny text file like "clang\n"
-                if real_clang.stat().st_size < 4096:
-                    txt = real_clang.read_bytes()
-                    if b'\x00' not in txt:
-                        ok = False
-            except Exception:
-                pass
-        if ok:
-            os.environ['ANDROID_NDK'] = str(ndk_path)
-            self.log_msg(f'NDK OK: {ndk_path}')
-            return
-        if ndk_path.exists():
-            self.log_msg(f'Fixing or re-downloading NDK: {ndk_path}')
-            self._fix_ndk_layout(ndk_path)
-            # recheck after fix
-            ok2 = clang.exists() and os.access(clang, os.X_OK)
-            if ok2 and real_clang.exists():
+        def ok_ndk():
+            if not (clang.exists() and os.access(clang, os.X_OK)): return False
+            if real_clang.exists() and not real_clang.is_symlink():
                 try:
-                    if real_clang.is_symlink() or real_clang.stat().st_size > 4096:
-                        os.environ['ANDROID_NDK'] = str(ndk_path)
-                        self.log_msg(f'NDK OK after repair: {ndk_path}')
-                        return
-                except Exception:
-                    pass
-            self.log_msg(f'NDK still incomplete, re-downloading: {ndk_path}')
-            try:
-                shutil.rmtree(ndk_path)
-            except Exception as e:
-                self.log_msg(f'Could not remove incomplete NDK: {e}')
-        if ndk_path.exists():
-            self.log_msg(f'NDK directory exists but is incomplete, re-downloading: {ndk_path}')
-            try:
-                shutil.rmtree(ndk_path)
-            except Exception as e:
-                self.log_msg(f'Could not remove incomplete NDK: {e}')
-        if platform.system().lower() != 'linux':
-            self.log_msg('Automatic NDK bootstrap is currently implemented for Linux; install NDK r27c manually on this OS.')
+                    if real_clang.stat().st_size < 4096 and b'\x00' not in real_clang.read_bytes(): return False
+                except Exception: pass
+            return True
+        if ndk_path.exists() and not ok_ndk():
+            self._fix_ndk_layout(ndk_path)
+        if ok_ndk():
+            os.environ['ANDROID_NDK'] = str(ndk_path)
             return
-        # download into expected location
+        if ndk_path.exists():
+            try: shutil.rmtree(ndk_path)
+            except Exception: pass
+        if platform.system().lower() != 'linux':
+            return
         ndk_path.parent.mkdir(parents=True, exist_ok=True)
         url = 'https://dl.google.com/android/repository/android-ndk-r27c-linux.zip'
         z = wd / 'android-ndk-r27c-linux.zip'
-        self.download_file(url, z, 'Downloading Android NDK r27c (large)...')
+        self.download_file(url, z, 'Downloading Android NDK r27c (large download)...')
         tmp = wd / 'ndk_extract'
         if tmp.exists(): shutil.rmtree(tmp)
         self.extract_zip(z, tmp, 'Extracting Android NDK r27c...')
         extracted = tmp / 'android-ndk-r27c'
         if not extracted.exists():
             dirs = [d for d in tmp.iterdir() if d.is_dir()]
-            if dirs:
-                extracted = dirs[0]
-        if not extracted.exists():
-            raise RuntimeError('Could not locate extracted NDK directory')
+            extracted = dirs[0] if dirs else extracted
         if ndk_path.exists(): shutil.rmtree(ndk_path)
         shutil.move(str(extracted), str(ndk_path))
         shutil.rmtree(tmp, ignore_errors=True)
@@ -561,150 +517,182 @@ class App(tk.Tk):
         except Exception: pass
         self._fix_ndk_layout(ndk_path)
         os.environ['ANDROID_NDK'] = str(ndk_path)
-        self.log_msg(f'NDK ready: {ndk_path}')
-
-    def find_tool(self, name):
-        p = shutil.which(name)
-        if p:
-            return Path(p)
-        candidates = []
-        home = Path.home()
-        sdk_roots = [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(home/'Android/Sdk'), '/usr/lib/android-sdk']
-        for root in sdk_roots:
-            if not root:
-                continue
-            r = Path(root)
-            candidates += list(r.glob(f'build-tools/*/{name}'))
-            candidates += list(r.glob(f'build-tools/*/{name}.exe'))
-            candidates += list(r.glob(f'cmdline-tools/latest/bin/{name}'))
-        for c in candidates:
-            if c.exists():
-                return c
-        return None
-
-    def ensure_lief(self):
-        try:
-            import lief  # noqa
-            self.log_msg('python lief: OK')
-            return True
-        except Exception:
-            self.log_msg('python lief not found, trying to install (pip --user)...')
-            try:
-                self.run_cmd([sys.executable, '-m', 'pip', 'install', '--user', 'lief'], check=False)
-            except Exception as e:
-                self.log_msg(f'lief install attempt failed: {e}')
-            try:
-                import lief  # noqa
-                self.log_msg('python lief: installed')
-                return True
-            except Exception:
-                self.log_msg('python lief still missing (install manually: pip install lief)')
-                return False
 
     def prepare_build_env(self, patcher: Path):
-        self.set_step('Preparing build environment...')
-        self.set_progress(None, None, 'Checking/installing build dependencies', 'indeterminate')
+        self.set_progress(step='Preparing build environment', item='Setting up tools and dependencies', item_mode='indeterminate', item_detail='')
         wd = self.workdir
         tools = patcher / 'tools'
         tools.mkdir(parents=True, exist_ok=True)
-
-        # python deps in venv (handles externally-managed python)
-        try:
-            self.ensure_python_deps_env(wd)
-        except Exception as e:
-            self.log_msg(f'Python env setup issue: {e}')
-
-        # java + android tools + ndk bootstraps
-        self.ensure_java()
-        try:
-            self.bootstrap_android_tools(patcher, wd)
-        except Exception as e:
-            self.log_msg(f'Android build-tools bootstrap issue: {e}')
-        try:
-            self.bootstrap_ndk(wd)
-        except Exception as e:
-            self.log_msg(f'NDK bootstrap issue: {e}')
-
-        # baksmali/smali (needed by pairip_strip)
+        try: self.ensure_python_deps_env(wd)
+        except Exception as e: self.log(f'Python env setup issue: {e}')
+        try: self.bootstrap_android_tools(patcher, wd)
+        except Exception as e: self.log(f'Build-tools setup issue: {e}')
+        try: self.bootstrap_ndk(wd)
+        except Exception as e: self.log(f'NDK setup issue: {e}')
+        # baksmali/smali
         def ensure_jar(name, urls):
             dest = tools / f'{name}.jar'
-            if dest.exists() and dest.stat().st_size > 0:
-                return True
+            if dest.exists() and dest.stat().st_size > 0: return
             for url in urls:
                 try:
                     self.download_file(url, dest, f'Downloading {name}.jar...')
-                    if dest.exists() and dest.stat().st_size > 10000:
-                        return True
+                    if dest.exists() and dest.stat().st_size > 10000: return
                 except Exception as e:
-                    self.log_msg(f'Failed to download {name} from {url}: {e}')
+                    self.log(f'Failed {name} from {url}: {e}')
                     try: dest.unlink()
                     except Exception: pass
-            return dest.exists()
-        if not shutil.which('baksmali') and not (tools / 'baksmali.jar').exists():
-            ensure_jar('baksmali', [
-                'https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar',
-                'https://repo1.maven.org/maven2/org/smali/baksmali/2.5.2/baksmali-2.5.2.jar',
-            ])
-        if not shutil.which('smali') and not (tools / 'smali.jar').exists():
-            ensure_jar('smali', [
-                'https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar',
-                'https://repo1.maven.org/maven2/org/smali/smali/2.5.2/smali-2.5.2.jar',
-            ])
-
+        if not shutil.which('baksmali') and not (tools/'baksmali.jar').exists():
+            ensure_jar('baksmali', ['https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar'])
+        if not shutil.which('smali') and not (tools/'smali.jar').exists():
+            ensure_jar('smali', ['https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar'])
         # keystore
         ks = tools / 'debug.keystore'
-        if not ks.exists():
-            if shutil.which('keytool'):
-                self.log_msg('Creating debug.keystore...')
-                mk = patcher / 'scripts' / 'make-keystore.sh'
-                if mk.exists():
-                    self.run_cmd(['bash', str(mk)], cwd=patcher, check=False)
-            else:
-                self.log_msg('keytool not found; cannot auto-create debug.keystore')
-
-        # try locate/copy again
-        za = self.find_tool('zipalign')
-        if za and not (tools / 'zipalign').exists() and za.is_file():
-            try:
-                shutil.copy2(za, tools / 'zipalign'); os.chmod(tools / 'zipalign', 0o755)
-            except Exception: pass
-        if not (tools / 'lib' / 'apksigner.jar').exists():
-            aj = self.find_tool('apksigner.jar') if hasattr(self, 'find_tool') else None
-            for root in [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(Path.home()/'Android/Sdk'), str(wd/'android-sdk'), '/usr/lib/android-sdk']:
-                if not root: continue
-                jars = list(Path(root).glob('build-tools/*/lib/apksigner.jar'))
-                if jars:
-                    (tools / 'lib').mkdir(parents=True, exist_ok=True)
-                    try: shutil.copy2(jars[-1], tools / 'lib' / 'apksigner.jar')
-                    except Exception: pass
-                    break
+        if not ks.exists() and shutil.which('keytool'):
+            mk = patcher / 'scripts' / 'make-keystore.sh'
+            if mk.exists(): self.run_cmd(['bash', str(mk)], cwd=patcher, check=False)
 
         missing = []
-        if not shutil.which('java'): missing.append('java')
-        if not (tools / 'zipalign').exists() and not shutil.which('zipalign'): missing.append('zipalign (Android build-tools)')
-        if not (tools / 'lib' / 'apksigner.jar').exists() and not shutil.which('apksigner'): missing.append('apksigner (Android build-tools)')
-        if not (tools / 'debug.keystore').exists(): missing.append('tools/debug.keystore')
-        if not shutil.which('baksmali') and not (tools / 'baksmali.jar').exists(): missing.append('baksmali')
-        if not shutil.which('smali') and not (tools / 'smali.jar').exists(): missing.append('smali')
-        ndk = os.environ.get('ANDROID_NDK') or str(Path.home()/'x'/'ndk'/'android-ndk-r27c')
-        if not Path(ndk).exists(): missing.append(f'Android NDK r27c (expected at {ndk})')
-        try:
-            subprocess.run([sys.executable, '-c', 'import lief'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except Exception:
-            # check venv python
-            vpy = wd / 'venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-            ok = False
-            if vpy.exists():
-                r = subprocess.run([str(vpy), '-c', 'import lief'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                ok = (r.returncode == 0)
-            if not ok:
-                missing.append('python lief')
+        if not shutil.which('java'): missing.append('Java (JDK/JRE)')
+        if not (tools / 'zipalign').exists() and not shutil.which('zipalign'): missing.append('Android build-tools (zipalign)')
+        if not (tools / 'lib' / 'apksigner.jar').exists() and not shutil.which('apksigner'): missing.append('Android build-tools (apksigner)')
+        if not (tools / 'debug.keystore').exists(): missing.append('Signing keystore (keytool)')
+        ndk = Path(os.environ.get('ANDROID_NDK') or (Path.home()/'x'/'ndk'/'android-ndk-r27c'))
+        if not (ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++').exists():
+            missing.append('Android NDK r27c')
         if missing:
-            msg = 'Missing build dependencies:\n- ' + '\n- '.join(missing)
-            self.log_msg(msg)
-            self.log_msg('Build may fail if required tools are still missing.')
-        else:
-            self.log_msg('Build environment looks ready.')
+            raise self.human_error(
+                "Build dependencies are missing",
+                "Some required tools could not be installed automatically:\n- " + "\n- ".join(missing),
+                [
+                    "Install Java and Android SDK build-tools/NDK, then run again",
+                    "On Linux, the app tries to auto-download build-tools and NDK (this needs internet and disk space)",
+                    "Check the terminal log above for the specific download/setup error",
+                ]
+            )
+        self.log('Build environment ready.')
+
+    # ---------- install/push ----------
+    def _infer_package(self, apks):
+        for a in apks:
+            name = a.stem
+            if name.startswith('config.') or name.startswith('Unity'):
+                continue
+            if '.' in name:
+                return name
+        return self.package or DEFAULT_PACKAGE
+
+    def install_apks(self, apks):
+        self.set_progress(step='Installing APKs on device', overall=80, overall_text='Building complete, installing...',
+                          item='Preparing APK install session', item_mode='indeterminate', item_detail='')
+        if not apks:
+            raise self.human_error("No APKs to install", "The build output does not contain signed APK files.",
+                                   ["Check the build log for errors", "Try running again"])
+        pkg = self._infer_package(apks)
+        remote_tmp = '/data/local/tmp/easy_ap_install'
+        total = len(apks)
+
+        # Clean temp and push each APK with per-file progress
+        self.adb(['shell', 'rm', '-rf', remote_tmp], check=False)
+        self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
+        for i, apk in enumerate(apks, 1):
+            size = apk.stat().st_size
+            self.set_progress(step='Installing APKs on device', item=f'APK {i}/{total}: {apk.name}',
+                              item_mode='determinate', item_value=0, item_detail=f'Pushing {fmt_bytes(size)} to device...')
+            self.log(f'Pushing APK {i}/{total}: {apk.name} ({fmt_bytes(size)})')
+            try:
+                self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
+            except Exception:
+                self._wait_for_device()
+                self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
+                self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
+            self.set_progress(item_value=100, item_detail=f'Pushed {apk.name}')
+
+        # Create install session
+        self.set_progress(item='Creating install session', item_mode='indeterminate', item_detail='Starting package install...')
+        total_size = sum(a.stat().st_size for a in apks)
+        create_args = ['shell', 'pm', 'install-create', '-r', '-S', str(total_size)]
+        try:
+            out = self.adb(create_args, capture=True)
+        except Exception:
+            # retry without -S if unsupported
+            out = self.adb(['shell', 'pm', 'install-create', '-r'], capture=True)
+        m = re.search(r'\[(\d+)\]', out)
+        if not m:
+            raise self.human_error("Failed to start install session", out.strip() or "pm install-create did not return a session ID.",
+                                   ["Make sure the device allows app installs", "Try uninstalling the existing app manually if signature differs", "Check USB debugging permissions on the phone"])
+        session = m.group(1)
+        self.log(f'Install session: {session}')
+
+        # Write each APK (per-apk progress)
+        try:
+            for i, apk in enumerate(apks, 1):
+                self.set_progress(step='Installing APKs on device', item=f'APK {i}/{total}: {apk.name}',
+                                  item_mode='determinate', item_value=30, item_detail='Adding APK to install session...')
+                remote = f'{remote_tmp}/{apk.name}'
+                self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, remote])
+                self.set_progress(item_value=100, item_detail=f'Added {apk.name} to session')
+
+            self.set_progress(item='Committing install', item_mode='indeterminate', item_detail='Finalizing installation on device (this may take a moment)...')
+            out = self.adb(['shell', 'pm', 'install-commit', session], capture=True)
+            if 'Success' not in out:
+                # handle signature mismatch by uninstalling and retrying whole flow
+                if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in out or 'signatures do not match' in out.lower():
+                    self.log(f'Signature mismatch. Uninstalling {pkg} and retrying install...')
+                    self.set_progress(item='Signature mismatch', item_detail=f'Uninstalling existing {pkg} and reinstalling...')
+                    self.adb(['uninstall', pkg], check=False)
+                    # recreate session and retry
+                    self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
+                    for apk in apks:
+                        self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
+                    out2 = self.adb(['shell', 'pm', 'install-create', '-r', '-S', str(total_size)], capture=True, check=False)
+                    m2 = re.search(r'\[(\d+)\]', out2)
+                    if not m2:
+                        raise self.human_error("Install failed after uninstall", out.strip() + "\n" + out2.strip(),
+                                               ["Remove the existing app manually from device settings", "Ensure enough storage space on the device"])
+                    session = m2.group(1)
+                    for apk in apks:
+                        self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, f'{remote_tmp}/{apk.name}'])
+                    out = self.adb(['shell', 'pm', 'install-commit', session], capture=True)
+                if 'Success' not in out:
+                    raise self.human_error("App install failed", out.strip() or "pm install-commit did not report Success.",
+                                           ["Check device storage space", "If a store version is installed, uninstall it and try again", "Make sure the device allows installing this app"])
+        finally:
+            self.adb(['shell', 'rm', '-rf', remote_tmp], check=False)
+
+        self.set_progress(item='Install complete', item_mode='determinate', item_value=100, item_detail=f'Installed {total} APK(s)')
+        self.log(f'Installed {total} APK(s) successfully.')
+
+    def push_bundles(self, bundles_dir: Path):
+        self.set_progress(step='Pushing bundles', overall=90, item='Preparing bundles', item_mode='indeterminate', item_detail='')
+        files = sorted([p for p in bundles_dir.iterdir() if p.is_file() and p.suffix == '.bundle'])
+        if not files:
+            files = sorted([p for p in bundles_dir.iterdir() if p.is_file()])
+        if not files:
+            self.log('No bundle files found to push; skipping.')
+            self.set_progress(item='No bundles to push', item_mode='determinate', item_value=100, item_detail='Skipped')
+            return
+        pkg = self.package or DEFAULT_PACKAGE
+        remote = f"/sdcard/Android/data/{pkg}/files/AssetPackStubs/OutfitsAssetPack"
+        try:
+            self.adb(["shell", "mkdir", "-p", remote], check=False)
+        except Exception:
+            self._wait_for_device()
+            self.adb(["shell", "mkdir", "-p", remote], check=False)
+
+        total = len(files)
+        for i, f in enumerate(files, 1):
+            size = f.stat().st_size
+            self.set_progress(step='Pushing bundles', item=f'Bundle {i}/{total}: {f.name}',
+                              item_mode='determinate', item_value=0, item_detail=f'{fmt_bytes(size)}')
+            try:
+                self.adb(["push", str(f), f"{remote}/{f.name}"])
+            except Exception:
+                self.log(f'Push failed for {f.name}, reconnecting...')
+                self._wait_for_device()
+                self.adb(["shell", "mkdir", "-p", remote], check=False)
+                self.adb(["push", str(f), f"{remote}/{f.name}"])
+            self.set_progress(item_value=100, overall=90 + int(i * 10 / total), item_detail=f'Pushed {i}/{total}')
+        self.log(f'Pushed {total} bundle file(s) to {remote}')
 
     # ---------- workflow ----------
     def start_auto(self):
@@ -717,99 +705,93 @@ class App(tk.Tk):
     def workflow(self):
         try:
             wd = self.workdir
+            self.set_progress(status="Preparing...", step="Cleaning work folder", overall=0, overall_mode="determinate",
+                              overall_text="0%", item="Work folder", item_mode="indeterminate", item_detail=str(wd))
             if wd.exists():
-                self.log_msg(f"Cleaning work directory: {wd}")
                 shutil.rmtree(wd, ignore_errors=True)
             wd.mkdir(parents=True, exist_ok=True)
-            self.set_status("Working...")
 
             # 1 patcher
+            self.set_progress(status="Downloading files", overall_text="Step 1/6")
             patch_zip = wd / "2025-android-patcher.zip"
-            self.download_file(PATCH_ZIP_URL, patch_zip, "Downloading patcher...")
+            self.download_file(PATCH_ZIP_URL, patch_zip, "Downloading patcher", 0, 8)
             extract_root = wd / "patcher_extract"
-            if extract_root.exists():
-                shutil.rmtree(extract_root)
-            self.extract_zip(patch_zip, extract_root, "Extracting patcher...")
+            if extract_root.exists(): shutil.rmtree(extract_root)
+            self.extract_zip(patch_zip, extract_root, "Extracting patcher")
             extracted = extract_root / "2025-android-patcher-main"
             if not extracted.exists():
                 dirs = [p for p in extract_root.iterdir() if p.is_dir()]
-                if len(dirs) == 1:
-                    extracted = dirs[0]
-                else:
-                    raise RuntimeError("Could not find extracted patcher folder")
+                extracted = dirs[0] if dirs else extracted
             patcher = wd / "2025-android-patcher"
-            if patcher.exists():
-                shutil.rmtree(patcher)
-            extracted.rename(patcher)
-            self.log_msg(f"Patcher ready: {patcher}")
-            self.set_progress(100, 100, "Patcher downloaded and extracted", "determinate")
+            if patcher.exists(): shutil.rmtree(patcher)
+            shutil.move(str(extracted), str(patcher))
+            self.set_progress(overall=10, overall_text="Patcher ready")
 
-            # ask nameserver after downloading patcher
-            self.set_step("Nameserver required")
-            self.set_status("Waiting for nameserver input...")
+            # nameserver prompt
+            self.set_progress(status="Input needed", step="Nameserver", item="Waiting for nameserver",
+                              item_mode="indeterminate", item_detail="Enter the RecNet nameserver in the dialog")
             self.nameserver = ""
             self.nameserver_event.clear()
             self.ask_nameserver_ui()
             self.nameserver_event.wait()
             if not self.nameserver:
-                raise RuntimeError("Nameserver is required to continue.")
-            self.log_msg(f"Using nameserver: {self.nameserver}")
+                raise self.human_error("Nameserver required", "No nameserver was entered.",
+                                       ["Restart and enter your RecNet nameserver (host) when prompted"])
+            self.log(f"Using nameserver: {self.nameserver}")
 
             # 2 xapk
+            self.set_progress(status="Downloading files", overall_text="Step 2/6")
             xapk = wd / "base.xapk"
-            self.download_file(XAPK_URL, xapk, "Downloading base.xapk...")
+            self.download_file(XAPK_URL, xapk, "Downloading base.xapk", 10, 20)
 
             # 3 bundles
+            self.set_progress(status="Downloading files", overall_text="Step 3/6")
             bundles_zip = wd / "bundles.zip"
-            self.download_file(BUNDLES_URL, bundles_zip, "Downloading bundles.zip...")
-            self.extract_zip(bundles_zip, patcher / "bundles", "Extracting bundles into patcher/bundles...")
-            bcount = len(list((patcher / "bundles").glob("*.bundle")))
-            self.log_msg(f"Bundle files in patcher/bundles: {bcount}")
+            self.download_file(BUNDLES_URL, bundles_zip, "Downloading bundles.zip", 30, 15)
+            self.extract_zip(bundles_zip, patcher / "bundles", "Extracting bundles")
+            self.set_progress(overall=48, overall_text="Downloads complete")
 
-            # write config
-            self.write_config(patcher, self.nameserver)
+            # config
+            cfg = f"""[App]\nPackage Name = \n\n[Server]\nRecNet NameServer Host = {self.nameserver}\nOculus App Id =\n\n[Photon]\nApp Id Realtime =\nApp Id Voice =\nApp Id Chat =\nPhoton NameServer =\nPhoton NameServer Port = 0\n\n[Advanced]\nLog HTTP = true\nDebug = false\nLog HTTP Body Max = 10000\nLog Noisy Endpoints = false\n"""
+            (patcher / "2025.cfg").write_text(cfg, encoding="utf-8")
 
             # 4 build
+            self.set_progress(status="Building", overall=50, overall_text="Step 4/6: Building (this can take a while)",
+                              step="Build", item="Running build script", item_mode="indeterminate",
+                              item_detail="Compiling and patching APKs... see terminal for detailed build logs")
             self.prepare_build_env(patcher)
-            self.set_step("Building...")
-            self.set_progress(None, None, "Running build-phone.sh (this may take a while)", "indeterminate")
             env = os.environ.copy()
             env["CONFIG"] = str(patcher / "2025.cfg")
-            # Ensure PairIP startup/VM is not kept (neutered native core can't run executeVM)
             env.setdefault("PAIRIP_KEEP_STARTUP", "0")
             vbin = self.workdir / 'venv' / ('Scripts' if os.name == 'nt' else 'bin')
-            if vbin.exists():
-                env['PATH'] = str(vbin) + os.pathsep + env.get('PATH','')
-            if os.environ.get('ANDROID_NDK'):
-                env['ANDROID_NDK'] = os.environ['ANDROID_NDK']
-            if os.environ.get('ANDROID_HOME'):
-                env['ANDROID_HOME'] = os.environ['ANDROID_HOME']
-            if os.environ.get('ANDROID_SDK_ROOT'):
-                env['ANDROID_SDK_ROOT'] = os.environ['ANDROID_SDK_ROOT']
-            self.run_cmd(["bash", str(patcher / "scripts" / "build-phone.sh"), str(xapk)], cwd=patcher, env=env)
-            self.set_progress(100, 100, "Build complete", "determinate")
+            if vbin.exists(): env['PATH'] = str(vbin) + os.pathsep + env.get('PATH','')
+            for k in ('ANDROID_NDK','ANDROID_HOME','ANDROID_SDK_ROOT'):
+                if os.environ.get(k): env[k] = os.environ[k]
+            try:
+                self.run_cmd(["bash", str(patcher / "scripts" / "build-phone.sh"), str(xapk)], cwd=patcher, env=env)
+            except Exception as e:
+                raise self.human_error("Build failed", str(e),
+                                       ["Check the terminal output above for the first error", "Make sure required build tools are installed and try again", "Ensure you have enough disk space and a stable internet connection for downloads"])
+            self.set_progress(overall=78, overall_text="Build complete")
 
-            # 5 adb + device + install/push
+            # 5 device + install
             self.ensure_adb()
-            self.selected_device = None
             while True:
                 devices = self.get_adb_devices()
                 if not devices:
-                    self.set_step("No devices found")
-                    self.set_status("No devices found")
+                    self.set_progress(status="Waiting for device", step="Connect device", item="No devices found",
+                                      item_mode="indeterminate", item_detail="Connect phone with USB debugging enabled")
                     self.device_event.clear()
-                    self.ask_device_ui([])
+                    self.show_devices_ui([])
                     self.device_event.wait()
                     if self.selected_device == "__retry__":
                         self.selected_device = None
                         continue
-                    # should not happen, but loop
                     continue
-                # show selection (even if one, per request to select from buttons)
-                self.set_step("Select device")
-                self.set_status("Waiting for device selection...")
+                self.set_progress(status="Select device", step="Choose device", item="Device selection",
+                                  item_mode="indeterminate", item_detail="Select which device to install to")
                 self.device_event.clear()
-                self.ask_device_ui(devices)
+                self.show_devices_ui(devices)
                 self.device_event.wait()
                 if self.selected_device == "__retry__":
                     self.selected_device = None
@@ -817,154 +799,30 @@ class App(tk.Tk):
                 if self.selected_device:
                     break
 
-            # install APKs
             signed = patcher / "build" / "phone" / "signed"
             apks = sorted(signed.glob("*.apk"))
             if not apks:
-                raise RuntimeError(f"No APKs found in {signed}")
+                raise self.human_error("No built APKs found", f"Expected signed APKs in {signed}",
+                                       ["The build may have failed; check terminal logs", "Try running again"])
             self.install_apks(apks)
 
-            # push bundles
+            # 6 bundles
             self.push_bundles(patcher / "bundles")
 
-            self.set_step("All done")
-            self.set_status("Completed successfully")
-            self.set_progress(100, 100, "Install and bundle push complete", "determinate")
-            self.log_msg("DONE: build, install, and bundle push finished.")
+            self.set_progress(status="Done", step="Completed", overall=100, overall_text="100% - Finished",
+                              item="All steps completed", item_mode="determinate", item_value=100,
+                              item_detail="App installed and bundles pushed successfully")
+            self.log("DONE: build, install, and bundle push finished.")
+            self.ui(lambda: messagebox.showinfo("easy-ap", "Completed successfully.\n\nThe app was installed and bundles were pushed to your device."))
         except Exception as e:
-            self.log_msg(f"[ERROR] {e}")
-            self.set_step("Error")
-            self.set_status("Error")
-            self.after(0, lambda: messagebox.showerror("easy-ap", str(e)))
+            err = str(e)
+            self.log("\n[ERROR] " + err)
+            self.set_progress(status="Error", step="Failed", item="An error occurred", item_mode="determinate", item_value=0,
+                              item_detail="See message and terminal log for details")
+            self.ui(lambda m=err: messagebox.showerror("easy-ap", m))
         finally:
             self.running = False
-            self.after(0, lambda: self.start_btn.configure(state="normal"))
-
-    def write_config(self, patcher: Path, nameserver: str):
-        cfg = f"""[App]
-Package Name = 
-
-[Server]
-RecNet NameServer Host = {nameserver}
-Oculus App Id =
-
-[Photon]
-App Id Realtime =
-App Id Voice =
-App Id Chat =
-Photon NameServer =
-Photon NameServer Port = 0
-
-[Advanced]
-Log HTTP = true
-Debug = false
-Log HTTP Body Max = 10000
-Log Noisy Endpoints = false
-"""
-        (patcher / "2025.cfg").write_text(cfg, encoding="utf-8")
-        self.log_msg(f"Wrote {patcher / '2025.cfg'}")
-
-    def _infer_package(self, apks):
-        # try to infer package name from base apk filename like com.example.app.apk
-        for a in apks:
-            name = a.stem
-            if name.startswith('config.') or name.startswith('Unity'):
-                continue
-            if '.' in name:
-                return name
-        return self.package or DEFAULT_PACKAGE
-
-    def _wait_for_device(self, timeout=120):
-        import time
-        self.log_msg("Waiting for device to reconnect...")
-        end = time.time() + timeout
-        while time.time() < end:
-            devs = self.get_adb_devices()
-            if not devs:
-                self.run_cmd(["adb", "wait-for-device"], check=False)
-                devs = self.get_adb_devices()
-            if devs:
-                serials = [d[0] for d in devs]
-                if self.selected_device in serials:
-                    return
-                if len(devs) == 1:
-                    self.selected_device = devs[0][0]
-                    self.device_info_var.set(f"Selected device: {self.selected_device}")
-                    return
-                # if previously selected not present, keep it but try to proceed; adb -s may still work when back
-                if self.selected_device and self.selected_device != "__retry__":
-                    return
-                self.selected_device = devs[0][0]
-                return
-            time.sleep(2)
-        raise RuntimeError("Device not found/reconnected in time. Reconnect the device and try again.")
-
-    def install_apks(self, apks):
-        self.set_step("Installing APKs...")
-        total = len(apks)
-        if total == 0:
-            raise RuntimeError("No APKs to install")
-        # Split APKs must be installed together in one transaction
-        self.set_progress(0, 100, f"Installing {total} APK(s) (install-multiple)...", "determinate")
-        self.log_msg("Installing: " + ", ".join(a.name for a in apks))
-
-        def do_install(args):
-            try:
-                self.adb(args)
-                return True
-            except Exception:
-                # if device dropped, wait and retry once
-                devs = self.get_adb_devices()
-                if not devs or (self.selected_device and self.selected_device not in [d[0] for d in devs]):
-                    self.log_msg("Device connection lost during install. Waiting for reconnect...")
-                    try:
-                        self._wait_for_device()
-                        self.adb(args)
-                        return True
-                    except Exception:
-                        return False
-                return False
-
-        cmd = ["install-multiple", "-r"] + [str(a) for a in apks]
-        ok = do_install(cmd)
-        if not ok:
-            self.log_msg("install-multiple failed, retrying with -d (allow downgrade)...")
-            ok = do_install(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
-        if not ok:
-            pkg = self._infer_package(apks)
-            self.log_msg(f"Install still failed. Attempting uninstall of {pkg} (signature mismatch or incompatible install) and clean reinstall...")
-            self._wait_for_device()
-            self.adb(["uninstall", pkg], check=False)
-            self._wait_for_device()
-            self.adb(["install-multiple"] + [str(a) for a in apks])
-
-        self.set_progress(100, 100, f"Installed {total} APK(s)", "determinate")
-        self.log_msg(f"Installed {total} APK(s)")
-
-    def push_bundles(self, bundles_dir: Path):
-        self.set_step("Pushing bundles/OBB data...")
-        files = sorted([p for p in bundles_dir.iterdir() if p.is_file() and p.suffix == ".bundle"])
-        if not files:
-            files = sorted([p for p in bundles_dir.iterdir() if p.is_file()])
-        if not files:
-            self.log_msg("No bundle files found to push; skipping.")
-            self.set_progress(100, 100, "No bundles to push", "determinate")
-            return
-        remote = f"/sdcard/Android/data/{self.package}/files/AssetPackStubs/OutfitsAssetPack"
-        self.adb(["shell", "mkdir", "-p", remote])
-        total = len(files)
-        for i, f in enumerate(files, 1):
-            pct = int((i - 1) * 100 / total)
-            self.set_progress(pct, 100, f"Pushing bundle {i}/{total}: {f.name}", "determinate")
-            try:
-                self.adb(["push", str(f), f"{remote}/{f.name}"])
-            except Exception:
-                self.log_msg(f"Push failed for {f.name}, waiting for device and retrying...")
-                self._wait_for_device()
-                self.adb(["push", str(f), f"{remote}/{f.name}"])
-            pct = int(i * 100 / total)
-            self.set_progress(pct, 100, f"Pushed {i}/{total}: {f.name}", "determinate")
-        self.log_msg(f"Pushed {total} bundle file(s) to {remote}")
+            self.ui(lambda: self.start_btn.configure(state="normal"))
 
 
 if __name__ == "__main__":
