@@ -350,23 +350,40 @@ class App(tk.Tk):
             return
         # Download build-tools zip directly (simpler and no sdkmanager/license hassles)
         bt_root = wd / 'android-build-tools'
-        url = 'https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip'
-        z = wd / 'build-tools_r34.0.0-linux.zip'
+        urls = [
+            'https://dl.google.com/android/repository/build-tools_r34-linux.zip',
+            'https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip',
+            'https://dl.google.com/android/repository/34.0.0-linux.zip',
+        ]
+        z = wd / 'build-tools-linux.zip'
         if not bt_root.exists():
-            self.download_file(url, z, 'Downloading Android build-tools...')
-            tmp = wd / 'bt_extract'
-            if tmp.exists(): shutil.rmtree(tmp)
-            self.extract_zip(z, tmp, 'Extracting Android build-tools...')
-            # zip usually contains android-14/ or android-*/ folder
-            candidates = list(tmp.glob('android-*')) + list(tmp.glob('build-tools*'))
-            src = candidates[0] if candidates else (next(tmp.iterdir()) if any(tmp.iterdir()) else None)
-            if not src or not src.exists():
-                raise RuntimeError('Could not locate extracted build-tools directory')
-            if bt_root.exists(): shutil.rmtree(bt_root)
-            shutil.move(str(src), str(bt_root))
-            shutil.rmtree(tmp, ignore_errors=True)
-            try: z.unlink()
-            except Exception: pass
+            last_err = None
+            for url in urls:
+                try:
+                    self.download_file(url, z, 'Downloading Android build-tools...')
+                    tmp = wd / 'bt_extract'
+                    if tmp.exists(): shutil.rmtree(tmp)
+                    self.extract_zip(z, tmp, 'Extracting Android build-tools...')
+                    # zip usually contains android-14/, android-upsidedowncake/, or similar folder
+                    candidates = list(tmp.glob('android-*')) + list(tmp.glob('build-tools*')) + [d for d in tmp.iterdir() if d.is_dir()]
+                    src = candidates[0] if candidates else None
+                    if not src or not src.exists():
+                        raise RuntimeError('Could not locate extracted build-tools directory')
+                    if bt_root.exists(): shutil.rmtree(bt_root)
+                    shutil.move(str(src), str(bt_root))
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    try: z.unlink()
+                    except Exception: pass
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    self.log_msg(f'Build-tools download failed from {url}: {e}')
+                    try:
+                        if z.exists(): z.unlink()
+                    except Exception: pass
+            if last_err:
+                raise last_err
         za = bt_root / 'zipalign'
         if za.exists():
             try: os.chmod(za, 0o755)
