@@ -402,9 +402,7 @@ class App(tk.Tk):
         except Exception:
             missing.append('python lief')
         if missing:
-            msg = 'Missing build dependencies:
-- ' + '
-- '.join(missing)
+            msg = 'Missing build dependencies:\n- ' + '\n- '.join(missing)
             self.log_msg(msg)
             self.log_msg('Attempting build anyway; install missing items if it fails.')
 
