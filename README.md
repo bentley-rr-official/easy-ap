@@ -13,7 +13,7 @@ On start (and via **Start / Restart**), the app runs automatically:
 4. **Downloads `base.xapk` (with progress)**:  
    `curl` source: `https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t`
 5. **Downloads & extracts `bundles.zip` (with progress)**:  
-   `curl` source: `https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0`  
+   `curl` source: `https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0&confirm=t`  
    Bundles are extracted into `<workdir>/2025-android-patcher/bundles/`.
 6. **Builds** by writing `2025.cfg` (nameserver only) and running `scripts/build-phone.sh` on `base.xapk`.
 7. **Ensures `adb` is available** (attempts automatic installation if missing).
