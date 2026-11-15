@@ -1,13 +1,20 @@
 # easy-ap
 
-Simple GUI helper for downloading the **2025 Android Patcher** and required files.
+Simple GUI helper for downloading, building, installing, and pushing bundles for the **2025 Android Patcher**.
 
 ## What it does
 
-The GUI can:
+The GUI asks for:
+- **Work directory** (where files are downloaded/built)
+- **Nameserver** (only this value is configured; written as `RecNet NameServer Host` in `2025.cfg`)
+- **Device package** (used for bundle push target, default `com.AgainstGravity.RecRoom`)
 
-1. **Download patches from GitHub**  
-   Clones/updates [`bentley-rr-official/2025-android-patcher`](https://github.com/bentley-rr-official/2025-android-patcher) into `<workdir>/2025-android-patcher` (falls back to downloading the repo zip if `git` is unavailable).
+Actions:
+
+1. **Download patcher (zip)**  
+   Downloads and extracts:  
+   `https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip`  
+   into `<workdir>/2025-android-patcher`.
 
 2. **Download `base.xapk`**  
    Downloads to `<workdir>/base.xapk` using:
@@ -15,20 +22,36 @@ The GUI can:
    curl -L "https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t" -o base.xapk
    ```
 
-3. **Download and extract `bundles.zip`**  
-   Downloads to `<workdir>/bundles.zip` using:
+3. **Download & extract bundles**  
+   Downloads `bundles.zip` to `<workdir>/bundles.zip` using:
    ```bash
    curl -L "https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0" -o bundles.zip
    ```
-   Then extracts files into `<workdir>/2025-android-patcher/bundles/` (so bundle files are in the patcher repo’s `bundles/` folder).
+   Then extracts files into `<workdir>/2025-android-patcher/bundles/`.
+
+4. **Build**  
+   Writes `<workdir>/2025-android-patcher/2025.cfg` with the provided nameserver and runs:
+   ```bash
+   bash scripts/build-phone.sh <workdir>/base.xapk
+   ```
+
+5. **Install to phone**  
+   Runs `build/phone/signed/install.sh` if present (otherwise falls back to `adb install-multiple`).
+
+6. **Push bundles to phone**  
+   Pushes `*.bundle` files from `<workdir>/2025-android-patcher/bundles/` to:
+   ```text
+   /sdcard/Android/data/<package>/files/AssetPackStubs/OutfitsAssetPack/
+   ```
+
+You can run steps individually or use **Run all (1 → 6)**.
 
 ## Requirements
 
-- Python 3
-- Tkinter (`python3-tk` on some Linux distros)
+- Python 3 + Tkinter (`python3-tk` on some Linux distros)
 - `curl`
-- `git` (recommended; zip fallback is used if missing)
-- Internet access
+- `bash`, `unzip`, `adb` (for install/push)
+- Build dependencies required by the patcher (e.g. `java`, `python3` + `lief`, `zipalign`/`apksigner`, `tools/debug.keystore`, Android NDK r27c, etc. as described in the patcher repo)
 
 ## Run
 
@@ -36,10 +59,8 @@ The GUI can:
 python3 easy_ap_gui.py
 ```
 
-Choose a work directory in the app, then run the actions individually or click **Run all (1 → 2 → 3)**.
-
 ## Notes
 
-- Download the patches first if you want `bundles.zip` extracted directly into the patcher’s `bundles/` directory.
-- Large downloads may take time; progress/output is shown in the log panel.
-- Files are saved locally in your selected work directory. Review and trust download sources before use.
+- Enter the **nameserver** before building (step 4 requires it).
+- Build/install steps depend on your local toolchain and a connected ADB device; check the log panel for errors from underlying commands.
+- This tool downloads and runs external code/files; review sources and use at your own risk.
