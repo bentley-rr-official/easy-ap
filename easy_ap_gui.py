@@ -236,15 +236,24 @@ class App(tk.Tk):
         if shutil.which("adb"):
             self.log_msg("adb found: " + shutil.which("adb"))
             return
+        # check common locations
+        candidates = []
+        home = Path.home()
+        candidates += [self.workdir / 'platform-tools' / ('adb.exe' if os.name=='nt' else 'adb'),
+                       home / "platform-tools" / "adb", home / "Android" / "platform-tools" / "adb",
+                       home / "Android" / "Sdk" / "platform-tools" / "adb"]
+        if os.name == "nt":
+            candidates += [Path("C:/platform-tools/adb.exe"), home / "AppData/Local/Android/Sdk/platform-tools/adb.exe"]
+        for c in candidates:
+            if c.exists():
+                os.environ["PATH"] = str(c.parent) + os.pathsep + os.environ.get("PATH", "")
+                if shutil.which("adb"):
+                    self.log_msg("adb found: " + shutil.which("adb"))
+                    return
         self.log_msg("adb not found, attempting to install...")
         self.install_adb()
         if not shutil.which("adb"):
-            # also check common platform-tools locations
-            candidates = []
-            home = Path.home()
-            candidates += [home / "platform-tools" / "adb", home / "Android" / "platform-tools" / "adb"]
-            if os.name == "nt":
-                candidates += [Path("C:/platform-tools/adb.exe"), home / "AppData/Local/Android/Sdk/platform-tools/adb.exe"]
+            # recheck
             for c in candidates:
                 if c.exists():
                     os.environ["PATH"] = str(c.parent) + os.pathsep + os.environ.get("PATH", "")
@@ -253,17 +262,67 @@ class App(tk.Tk):
             raise RuntimeError("adb is not installed and automatic installation failed. Please install Android platform-tools (adb) and restart.")
         self.log_msg("adb ready: " + shutil.which("adb"))
 
+    def _bootstrap_platform_tools(self):
+        system = platform.system().lower()
+        wd = self.workdir
+        if system == 'linux':
+            url = 'https://dl.google.com/android/repository/platform-tools-latest-linux.zip'
+            folder = 'platform-tools'
+        elif system == 'darwin':
+            url = 'https://dl.google.com/android/repository/platform-tools-latest-darwin.zip'
+            folder = 'platform-tools'
+        elif system == 'windows':
+            url = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip'
+            folder = 'platform-tools'
+        else:
+            return False
+        dest = wd / folder
+        adb_name = 'adb.exe' if system == 'windows' else 'adb'
+        if (dest / adb_name).exists():
+            os.environ['PATH'] = str(dest) + os.pathsep + os.environ.get('PATH', '')
+            return True
+        try:
+            z = wd / 'platform-tools.zip'
+            self.download_file(url, z, 'Downloading Android platform-tools (adb)...')
+            tmp = wd / 'pt_extract'
+            if tmp.exists(): shutil.rmtree(tmp)
+            self.extract_zip(z, tmp, 'Extracting platform-tools...')
+            src = tmp / 'platform-tools'
+            if not src.exists():
+                dirs = [d for d in tmp.iterdir() if d.is_dir()]
+                if dirs: src = dirs[0]
+            if dest.exists(): shutil.rmtree(dest)
+            shutil.move(str(src), str(dest))
+            shutil.rmtree(tmp, ignore_errors=True)
+            try: z.unlink()
+            except Exception: pass
+            adb_path = dest / adb_name
+            if adb_path.exists() and system != 'windows':
+                try: os.chmod(adb_path, adb_path.stat().st_mode | 0o111)
+                except Exception: pass
+            os.environ['PATH'] = str(dest) + os.pathsep + os.environ.get('PATH', '')
+            return (dest / adb_name).exists() or shutil.which('adb') is not None
+        except Exception as e:
+            self.log_msg(f'Platform-tools download failed: {e}')
+            return False
+
     def install_adb(self):
+        # Prefer downloading platform-tools (no sudo/password prompts)
+        try:
+            if self._bootstrap_platform_tools():
+                return
+        except Exception as e:
+            self.log_msg(f'Platform-tools bootstrap error: {e}')
         system = platform.system().lower()
         try:
             if system == "linux":
                 if shutil.which("apt-get"):
-                    self.run_cmd(["sudo", "apt-get", "update"], check=False)
-                    self.run_cmd(["sudo", "apt-get", "install", "-y", "adb"], check=False)
+                    self.run_cmd(["sudo", "-n", "apt-get", "update"], check=False)
+                    self.run_cmd(["sudo", "-n", "apt-get", "install", "-y", "adb"], check=False)
                 elif shutil.which("dnf"):
-                    self.run_cmd(["sudo", "dnf", "install", "-y", "android-tools"], check=False)
+                    self.run_cmd(["sudo", "-n", "dnf", "install", "-y", "android-tools"], check=False)
                 elif shutil.which("pacman"):
-                    self.run_cmd(["sudo", "pacman", "-S", "--noconfirm", "android-tools"], check=False)
+                    self.run_cmd(["sudo", "-n", "pacman", "-S", "--noconfirm", "android-tools"], check=False)
             elif system == "darwin":
                 if shutil.which("brew"):
                     self.run_cmd(["brew", "install", "android-platform-tools"], check=False)
