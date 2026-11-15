@@ -592,8 +592,15 @@ class App(tk.Tk):
         total = len(apks)
 
         # Clean temp and push each APK with per-file progress
-        self.adb(['shell', 'rm', '-rf', remote_tmp], check=False)
-        self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
+        try:
+            subprocess.run((["adb"] + (["-s", self.selected_device] if self.selected_device and self.selected_device!="__retry__" else []) + ['shell','rm','-rf', remote_tmp]), timeout=30, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except Exception as e:
+            self.log(f'Warning: could not clean temp dir on device ({e}), continuing...')
+        try:
+            self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
+        except Exception:
+            self._wait_for_device()
+            self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
         for i, apk in enumerate(apks, 1):
             size = apk.stat().st_size
             self.set_progress(step='Installing APKs on device', item=f'APK {i}/{total}: {apk.name}',
@@ -657,7 +664,10 @@ class App(tk.Tk):
                     raise self.human_error("App install failed", out.strip() or "pm install-commit did not report Success.",
                                            ["Check device storage space", "If a store version is installed, uninstall it and try again", "Make sure the device allows installing this app"])
         finally:
-            self.adb(['shell', 'rm', '-rf', remote_tmp], check=False)
+            try:
+                subprocess.run((["adb"] + (["-s", self.selected_device] if self.selected_device and self.selected_device!="__retry__" else []) + ['shell','rm','-rf', remote_tmp]), timeout=30, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except Exception:
+                pass
 
         self.set_progress(item='Install complete', item_mode='determinate', item_value=100, item_detail=f'Installed {total} APK(s)')
         self.log(f'Installed {total} APK(s) successfully.')
