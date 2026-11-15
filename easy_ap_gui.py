@@ -619,20 +619,27 @@ class App(tk.Tk):
             self.set_progress(item_value=100, item_detail=f'Pushed {apk.name}')
 
         # Create install session
+        def create_session():
+            create_args = ['shell', 'pm', 'install-create', '-r', '-S', str(total_size)]
+            out = self.adb(create_args, capture=True, check=False)
+            m = re.search(r'\[(\d+)\]', out)
+            if not m:
+                out = self.adb(['shell', 'pm', 'install-create', '-r'], capture=True, check=False)
+                m = re.search(r'\[(\d+)\]', out)
+            if not m:
+                raise self.human_error("Failed to start install session", (out or "").strip() or "pm install-create did not return a session ID.",
+                                       ["Make sure the device allows app installs", "Unlock the device and accept any prompts", "Try uninstalling the existing app manually if signature differs"])
+            sid = m.group(1)
+            self.log(f'Install session: {sid}')
+            return sid
+
+        def commit_session(session):
+            out = self.adb(['shell', 'pm', 'install-commit', session], capture=True, check=False)
+            return out
+
         self.set_progress(item='Creating install session', item_mode='indeterminate', item_detail='Starting package install...')
         total_size = sum(a.stat().st_size for a in apks)
-        create_args = ['shell', 'pm', 'install-create', '-r', '-S', str(total_size)]
-        try:
-            out = self.adb(create_args, capture=True)
-        except Exception:
-            # retry without -S if unsupported
-            out = self.adb(['shell', 'pm', 'install-create', '-r'], capture=True)
-        m = re.search(r'\[(\d+)\]', out)
-        if not m:
-            raise self.human_error("Failed to start install session", out.strip() or "pm install-create did not return a session ID.",
-                                   ["Make sure the device allows app installs", "Try uninstalling the existing app manually if signature differs", "Check USB debugging permissions on the phone"])
-        session = m.group(1)
-        self.log(f'Install session: {session}')
+        session = create_session()
 
         # Write each APK (per-apk progress)
         try:
@@ -640,33 +647,36 @@ class App(tk.Tk):
                 self.set_progress(step='Installing APKs on device', item=f'APK {i}/{total}: {apk.name}',
                                   item_mode='determinate', item_value=30, item_detail='Adding APK to install session...')
                 remote = f'{remote_tmp}/{apk.name}'
-                self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, remote])
+                outw = self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, remote], capture=True, check=False)
+                if outw and 'Success' not in outw and 'Failure' in outw:
+                    self.log(f'install-write warning/output: {outw.strip()}')
                 self.set_progress(item_value=100, item_detail=f'Added {apk.name} to session')
 
             self.set_progress(item='Committing install', item_mode='indeterminate', item_detail='Finalizing installation on device (this may take a moment)...')
-            out = self.adb(['shell', 'pm', 'install-commit', session], capture=True)
+            out = commit_session(session)
             if 'Success' not in out:
-                # handle signature mismatch by uninstalling and retrying whole flow
-                if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in out or 'signatures do not match' in out.lower():
+                if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in out or 'signatures do not match' in (out or '').lower():
                     self.log(f'Signature mismatch. Uninstalling {pkg} and retrying install...')
-                    self.set_progress(item='Signature mismatch', item_detail=f'Uninstalling existing {pkg} and reinstalling...')
+                    self.set_progress(item='Signature mismatch', item_mode='indeterminate', item_detail=f'Uninstalling existing {pkg} and reinstalling...')
                     self.adb(['uninstall', pkg], check=False)
                     # recreate session and retry
-                    self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False)
-                    for apk in apks:
+                    self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False, timeout=30)
+                    for i, apk in enumerate(apks, 1):
+                        self.set_progress(item=f'Re-uploading APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=0, item_detail='Pushing to device...')
                         self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
-                    out2 = self.adb(['shell', 'pm', 'install-create', '-r', '-S', str(total_size)], capture=True, check=False)
-                    m2 = re.search(r'\[(\d+)\]', out2)
-                    if not m2:
-                        raise self.human_error("Install failed after uninstall", out.strip() + "\n" + out2.strip(),
-                                               ["Remove the existing app manually from device settings", "Ensure enough storage space on the device"])
-                    session = m2.group(1)
-                    for apk in apks:
-                        self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, f'{remote_tmp}/{apk.name}'])
-                    out = self.adb(['shell', 'pm', 'install-commit', session], capture=True)
+                        self.set_progress(item_value=100)
+                    session = create_session()
+                    for i, apk in enumerate(apks, 1):
+                        self.set_progress(item=f'Adding APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=30)
+                        self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, f'{remote_tmp}/{apk.name}'], check=False)
+                        self.set_progress(item_value=100)
+                    self.set_progress(item='Committing install', item_mode='indeterminate', item_detail='Finalizing installation...')
+                    out = commit_session(session)
                 if 'Success' not in out:
-                    raise self.human_error("App install failed", out.strip() or "pm install-commit did not report Success.",
-                                           ["Check device storage space", "If a store version is installed, uninstall it and try again", "Make sure the device allows installing this app"])
+                    raise self.human_error("App install failed", (out or '').strip() or "Install did not complete successfully.",
+                                           ["If the app is already installed from another source (e.g. Play Store), uninstall it and try again",
+                                            "Check device storage space and that app installs are allowed",
+                                            "Keep the device connected/unlocked during installation"])
         finally:
             try:
                 self.adb(['shell', 'rm', '-rf', remote_tmp], check=False, timeout=30)
@@ -772,8 +782,11 @@ class App(tk.Tk):
             # 4 build
             self.set_progress(status="Building", overall=50, overall_text="Step 4/6: Building (this can take a while)",
                               step="Build", item="Running build script", item_mode="indeterminate",
-                              item_detail="Compiling and patching APKs... see terminal for detailed build logs")
+                              item_detail="Compiling and patching APKs... detailed build output is shown in the terminal window")
             self.prepare_build_env(patcher)
+            self.set_progress(status="Building", overall=55, overall_text="Step 4/6: Building (see terminal for live output)",
+                              step="Build", item="Running build script", item_mode="indeterminate",
+                              item_detail="Build in progress... watch the terminal for live updates")
             env = os.environ.copy()
             env["CONFIG"] = str(patcher / "2025.cfg")
             env.setdefault("PAIRIP_KEEP_STARTUP", "0")
