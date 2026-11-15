@@ -775,6 +775,8 @@ class App(tk.Tk):
             self.set_progress(None, None, "Running build-phone.sh (this may take a while)", "indeterminate")
             env = os.environ.copy()
             env["CONFIG"] = str(patcher / "2025.cfg")
+            # Ensure PairIP startup/VM is not kept (neutered native core can't run executeVM)
+            env.setdefault("PAIRIP_KEEP_STARTUP", "0")
             vbin = self.workdir / 'venv' / ('Scripts' if os.name == 'nt' else 'bin')
             if vbin.exists():
                 env['PATH'] = str(vbin) + os.pathsep + env.get('PATH','')
