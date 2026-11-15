@@ -294,6 +294,131 @@ class App(tk.Tk):
         return self.run_cmd(base + args, capture=capture, check=check)
 
     # ---------- build env ----------
+    def ensure_java(self):
+        if shutil.which('java'):
+            return True
+        self.log_msg('Java not found, attempting to install...')
+        system = platform.system().lower()
+        try:
+            if system == 'linux':
+                if shutil.which('apt-get'):
+                    self.run_cmd(['sudo','apt-get','update'], check=False)
+                    self.run_cmd(['sudo','apt-get','install','-y','openjdk-17-jre-headless'], check=False)
+                elif shutil.which('dnf'):
+                    self.run_cmd(['sudo','dnf','install','-y','java-17-openjdk-headless'], check=False)
+                elif shutil.which('pacman'):
+                    self.run_cmd(['sudo','pacman','-S','--noconfirm','jre17-openjdk-headless'], check=False)
+            elif system == 'darwin' and shutil.which('brew'):
+                self.run_cmd(['brew','install','openjdk@17'], check=False)
+            elif system == 'windows' and shutil.which('winget'):
+                self.run_cmd(['winget','install','-e','--id','EclipseAdoptium.Temurin.17.JRE'], check=False)
+        except Exception as e:
+            self.log_msg(f'Java install attempt failed: {e}')
+        return bool(shutil.which('java'))
+
+    def ensure_python_deps_env(self, wd: Path):
+        """Create/use a venv in workdir so pip installs work on externally-managed systems."""
+        venv = wd / 'venv'
+        py = venv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+        pip = venv / ('Scripts/pip.exe' if os.name == 'nt' else 'bin/pip')
+        if not py.exists():
+            self.log_msg('Creating Python virtual environment for build dependencies...')
+            self.run_cmd([sys.executable, '-m', 'venv', str(venv)], check=True)
+        # install lief
+        try:
+            self.run_cmd([str(py), '-c', 'import lief'], check=True, capture=True)
+            self.log_msg('python lief (venv): OK')
+        except Exception:
+            self.log_msg('Installing lief in venv...')
+            self.run_cmd([str(py), '-m', 'pip', 'install', '--upgrade', 'pip'], check=False)
+            self.run_cmd([str(py), '-m', 'pip', 'install', 'lief'], check=False)
+        # prepend venv bin to PATH for subsequent commands
+        bin_dir = str(venv / ('Scripts' if os.name == 'nt' else 'bin'))
+        os.environ['PATH'] = bin_dir + os.pathsep + os.environ.get('PATH', '')
+        self.log_msg(f'Using Python env: {bin_dir}')
+
+    def bootstrap_android_tools(self, patcher: Path, wd: Path):
+        tools = patcher / 'tools'
+        tools.mkdir(parents=True, exist_ok=True)
+        need_bt = not ((tools / 'zipalign').exists() or shutil.which('zipalign')) or not ((tools / 'lib' / 'apksigner.jar').exists() or shutil.which('apksigner') or (tools / 'apksigner').exists())
+        if not need_bt:
+            return
+        if platform.system().lower() != 'linux':
+            self.log_msg('Automatic Android build-tools bootstrap is currently implemented for Linux; please install Android SDK build-tools manually on this OS.')
+            return
+        if not shutil.which('java'):
+            self.log_msg('Java required to install Android build-tools; skipping auto-bootstrap.')
+            return
+        sdk = wd / 'android-sdk'
+        cmdtools = sdk / 'cmdline-tools'
+        if not (cmdtools / 'latest' / 'bin' / 'sdkmanager').exists():
+            url = 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip'
+            z = wd / 'cmdline-tools.zip'
+            self.download_file(url, z, 'Downloading Android command-line tools...')
+            tmp = wd / 'cmdtools_extract'
+            if tmp.exists(): shutil.rmtree(tmp)
+            self.extract_zip(z, tmp, 'Extracting Android command-line tools...')
+            (cmdtools / 'latest').mkdir(parents=True, exist_ok=True)
+            src = tmp / 'cmdline-tools'
+            if src.exists():
+                # move contents into latest
+                for item in src.iterdir():
+                    shutil.move(str(item), str(cmdtools / 'latest' / item.name))
+            shutil.rmtree(tmp, ignore_errors=True)
+        sdkmanager = cmdtools / 'latest' / 'bin' / 'sdkmanager'
+        env = os.environ.copy()
+        env['ANDROID_SDK_ROOT'] = str(sdk)
+        env['ANDROID_HOME'] = str(sdk)
+        self.set_step('Installing Android build-tools...')
+        self.set_progress(None, None, 'Running sdkmanager (accepting licenses)...', 'indeterminate')
+        try:
+            yes = subprocess.Popen(['bash','-lc','yes | "'+str(sdkmanager)+'" --sdk_root="'+str(sdk)+'" --licenses'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if yes.stdout:
+                for line in yes.stdout: self.log_msg(line.rstrip())
+            yes.wait()
+        except Exception as e:
+            self.log_msg(f'License acceptance failed: {e}')
+        self.run_cmd([str(sdkmanager), '--sdk_root='+str(sdk), 'platform-tools', 'build-tools;34.0.0'], env=env, check=False)
+        # copy tools
+        bt = sdk / 'build-tools' / '34.0.0'
+        za = bt / 'zipalign'
+        if za.exists() and not (tools / 'zipalign').exists():
+            shutil.copy2(za, tools / 'zipalign'); os.chmod(tools / 'zipalign', 0o755)
+        aj = bt / 'lib' / 'apksigner.jar'
+        if aj.exists() and not (tools / 'lib' / 'apksigner.jar').exists():
+            (tools / 'lib').mkdir(parents=True, exist_ok=True)
+            shutil.copy2(aj, tools / 'lib' / 'apksigner.jar')
+        os.environ['ANDROID_HOME'] = str(sdk)
+        os.environ['ANDROID_SDK_ROOT'] = str(sdk)
+
+    def bootstrap_ndk(self, wd: Path):
+        ndk_default = Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'
+        env_ndk = os.environ.get('ANDROID_NDK')
+        ndk_path = Path(env_ndk) if env_ndk else ndk_default
+        if ndk_path.exists():
+            os.environ['ANDROID_NDK'] = str(ndk_path)
+            return
+        if platform.system().lower() != 'linux':
+            self.log_msg('Automatic NDK bootstrap is currently implemented for Linux; install NDK r27c manually on this OS.')
+            return
+        # download into expected location
+        ndk_path.parent.mkdir(parents=True, exist_ok=True)
+        url = 'https://dl.google.com/android/repository/android-ndk-r27c-linux.zip'
+        z = wd / 'android-ndk-r27c-linux.zip'
+        self.download_file(url, z, 'Downloading Android NDK r27c (large)...')
+        tmp = wd / 'ndk_extract'
+        if tmp.exists(): shutil.rmtree(tmp)
+        self.extract_zip(z, tmp, 'Extracting Android NDK r27c...')
+        extracted = tmp / 'android-ndk-r27c'
+        if not extracted.exists():
+            dirs = [d for d in tmp.iterdir() if d.is_dir()]
+            if len(dirs)==1: extracted = dirs[0]
+        if ndk_path.exists(): shutil.rmtree(ndk_path)
+        shutil.move(str(extracted), str(ndk_path))
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.environ['ANDROID_NDK'] = str(ndk_path)
+        self.log_msg(f'NDK ready: {ndk_path}')
+
     def find_tool(self, name):
         p = shutil.which(name)
         if p:
@@ -334,9 +459,27 @@ class App(tk.Tk):
 
     def prepare_build_env(self, patcher: Path):
         self.set_step('Preparing build environment...')
-        self.set_progress(None, None, 'Checking build tools', 'indeterminate')
+        self.set_progress(None, None, 'Checking/installing build dependencies', 'indeterminate')
+        wd = self.workdir
         tools = patcher / 'tools'
         tools.mkdir(parents=True, exist_ok=True)
+
+        # python deps in venv (handles externally-managed python)
+        try:
+            self.ensure_python_deps_env(wd)
+        except Exception as e:
+            self.log_msg(f'Python env setup issue: {e}')
+
+        # java + android tools + ndk bootstraps
+        self.ensure_java()
+        try:
+            self.bootstrap_android_tools(patcher, wd)
+        except Exception as e:
+            self.log_msg(f'Android build-tools bootstrap issue: {e}')
+        try:
+            self.bootstrap_ndk(wd)
+        except Exception as e:
+            self.log_msg(f'NDK bootstrap issue: {e}')
 
         # keystore
         ks = tools / 'debug.keystore'
@@ -346,65 +489,50 @@ class App(tk.Tk):
                 mk = patcher / 'scripts' / 'make-keystore.sh'
                 if mk.exists():
                     self.run_cmd(['bash', str(mk)], cwd=patcher, check=False)
-                else:
-                    self.run_cmd(['keytool','-genkeypair','-keystore',str(ks),'-alias','2025','-storepass','android','-keypass','android','-keyalg','RSA','-keysize','2048','-validity','36500','-dname','CN=2025, O=2025'], check=False)
             else:
                 self.log_msg('keytool not found; cannot auto-create debug.keystore')
 
-        # zipalign/apksigner
+        # try locate/copy again
         za = self.find_tool('zipalign')
-        if za and not (tools / 'zipalign').exists():
+        if za and not (tools / 'zipalign').exists() and za.is_file():
             try:
-                if za.is_file():
-                    shutil.copy2(za, tools / 'zipalign')
-                    os.chmod(tools / 'zipalign', 0o755)
-                    self.log_msg(f'Copied zipalign from {za}')
-            except Exception as e:
-                self.log_msg(f'Could not copy zipalign: {e}')
-        apks = self.find_tool('apksigner')
-        if apks and not (tools / 'apksigner').exists() and apks.suffix != '.jar':
-            try:
-                shutil.copy2(apks, tools / 'apksigner')
-                os.chmod(tools / 'apksigner', 0o755)
-                self.log_msg(f'Copied apksigner from {apks}')
-            except Exception:
-                pass
-        # apksigner.jar in build-tools lib
+                shutil.copy2(za, tools / 'zipalign'); os.chmod(tools / 'zipalign', 0o755)
+            except Exception: pass
         if not (tools / 'lib' / 'apksigner.jar').exists():
-            for root in [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(Path.home()/'Android/Sdk'), '/usr/lib/android-sdk']:
+            aj = self.find_tool('apksigner.jar') if hasattr(self, 'find_tool') else None
+            for root in [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(Path.home()/'Android/Sdk'), str(wd/'android-sdk'), '/usr/lib/android-sdk']:
                 if not root: continue
                 jars = list(Path(root).glob('build-tools/*/lib/apksigner.jar'))
                 if jars:
                     (tools / 'lib').mkdir(parents=True, exist_ok=True)
-                    try:
-                        shutil.copy2(jars[-1], tools / 'lib' / 'apksigner.jar')
-                        self.log_msg(f'Copied apksigner.jar from {jars[-1]}')
-                    except Exception:
-                        pass
+                    try: shutil.copy2(jars[-1], tools / 'lib' / 'apksigner.jar')
+                    except Exception: pass
                     break
 
-        self.ensure_lief()
-
         missing = []
-        if not shutil.which('java') and not shutil.which('java.exe'):
-            missing.append('java')
-        if not (tools / 'zipalign').exists() and not shutil.which('zipalign'):
-            missing.append('zipalign (Android build-tools)')
-        if not (tools / 'lib' / 'apksigner.jar').exists() and not (tools / 'apksigner').exists() and not shutil.which('apksigner'):
-            missing.append('apksigner (Android build-tools)')
-        if not (tools / 'debug.keystore').exists():
-            missing.append('tools/debug.keystore')
+        if not shutil.which('java'): missing.append('java')
+        if not (tools / 'zipalign').exists() and not shutil.which('zipalign'): missing.append('zipalign (Android build-tools)')
+        if not (tools / 'lib' / 'apksigner.jar').exists() and not shutil.which('apksigner'): missing.append('apksigner (Android build-tools)')
+        if not (tools / 'debug.keystore').exists(): missing.append('tools/debug.keystore')
         ndk = os.environ.get('ANDROID_NDK') or str(Path.home()/'x'/'ndk'/'android-ndk-r27c')
-        if not Path(ndk).exists():
-            missing.append(f'Android NDK r27c (expected at {ndk} or set ANDROID_NDK)')
+        if not Path(ndk).exists(): missing.append(f'Android NDK r27c (expected at {ndk})')
         try:
-            import lief  # noqa
+            subprocess.run([sys.executable, '-c', 'import lief'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except Exception:
-            missing.append('python lief')
+            # check venv python
+            vpy = wd / 'venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+            ok = False
+            if vpy.exists():
+                r = subprocess.run([str(vpy), '-c', 'import lief'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                ok = (r.returncode == 0)
+            if not ok:
+                missing.append('python lief')
         if missing:
             msg = 'Missing build dependencies:\n- ' + '\n- '.join(missing)
             self.log_msg(msg)
-            self.log_msg('Attempting build anyway; install missing items if it fails.')
+            self.log_msg('Build may fail if required tools are still missing.')
+        else:
+            self.log_msg('Build environment looks ready.')
 
     # ---------- workflow ----------
     def start_auto(self):
@@ -475,6 +603,15 @@ class App(tk.Tk):
             self.set_progress(None, None, "Running build-phone.sh (this may take a while)", "indeterminate")
             env = os.environ.copy()
             env["CONFIG"] = str(patcher / "2025.cfg")
+            vbin = self.workdir / 'venv' / ('Scripts' if os.name == 'nt' else 'bin')
+            if vbin.exists():
+                env['PATH'] = str(vbin) + os.pathsep + env.get('PATH','')
+            if os.environ.get('ANDROID_NDK'):
+                env['ANDROID_NDK'] = os.environ['ANDROID_NDK']
+            if os.environ.get('ANDROID_HOME'):
+                env['ANDROID_HOME'] = os.environ['ANDROID_HOME']
+            if os.environ.get('ANDROID_SDK_ROOT'):
+                env['ANDROID_SDK_ROOT'] = os.environ['ANDROID_SDK_ROOT']
             self.run_cmd(["bash", str(patcher / "scripts" / "build-phone.sh"), str(xapk)], cwd=patcher, env=env)
             self.set_progress(100, 100, "Build complete", "determinate")
 
