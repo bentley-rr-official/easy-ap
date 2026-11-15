@@ -872,6 +872,31 @@ Log Noisy Endpoints = false
                 return name
         return self.package or DEFAULT_PACKAGE
 
+    def _wait_for_device(self, timeout=120):
+        import time
+        self.log_msg("Waiting for device to reconnect...")
+        end = time.time() + timeout
+        while time.time() < end:
+            devs = self.get_adb_devices()
+            if not devs:
+                self.run_cmd(["adb", "wait-for-device"], check=False)
+                devs = self.get_adb_devices()
+            if devs:
+                serials = [d[0] for d in devs]
+                if self.selected_device in serials:
+                    return
+                if len(devs) == 1:
+                    self.selected_device = devs[0][0]
+                    self.device_info_var.set(f"Selected device: {self.selected_device}")
+                    return
+                # if previously selected not present, keep it but try to proceed; adb -s may still work when back
+                if self.selected_device and self.selected_device != "__retry__":
+                    return
+                self.selected_device = devs[0][0]
+                return
+            time.sleep(2)
+        raise RuntimeError("Device not found/reconnected in time. Reconnect the device and try again.")
+
     def install_apks(self, apks):
         self.set_step("Installing APKs...")
         total = len(apks)
@@ -880,18 +905,37 @@ Log Noisy Endpoints = false
         # Split APKs must be installed together in one transaction
         self.set_progress(0, 100, f"Installing {total} APK(s) (install-multiple)...", "determinate")
         self.log_msg("Installing: " + ", ".join(a.name for a in apks))
-        cmd = ["install-multiple", "-r"] + [str(a) for a in apks]
-        try:
-            self.adb(cmd)
-        except Exception:
-            self.log_msg("install-multiple failed, retrying with -d (allow downgrade)...")
+
+        def do_install(args):
             try:
-                self.adb(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
+                self.adb(args)
+                return True
             except Exception:
-                pkg = self._infer_package(apks)
-                self.log_msg(f"Install still failed. Attempting uninstall of {pkg} (signature mismatch or incompatible install) and clean reinstall...")
-                self.adb(["uninstall", pkg], check=False)
-                self.adb(["install-multiple"] + [str(a) for a in apks])
+                # if device dropped, wait and retry once
+                devs = self.get_adb_devices()
+                if not devs or (self.selected_device and self.selected_device not in [d[0] for d in devs]):
+                    self.log_msg("Device connection lost during install. Waiting for reconnect...")
+                    try:
+                        self._wait_for_device()
+                        self.adb(args)
+                        return True
+                    except Exception:
+                        return False
+                return False
+
+        cmd = ["install-multiple", "-r"] + [str(a) for a in apks]
+        ok = do_install(cmd)
+        if not ok:
+            self.log_msg("install-multiple failed, retrying with -d (allow downgrade)...")
+            ok = do_install(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
+        if not ok:
+            pkg = self._infer_package(apks)
+            self.log_msg(f"Install still failed. Attempting uninstall of {pkg} (signature mismatch or incompatible install) and clean reinstall...")
+            self._wait_for_device()
+            self.adb(["uninstall", pkg], check=False)
+            self._wait_for_device()
+            self.adb(["install-multiple"] + [str(a) for a in apks])
+
         self.set_progress(100, 100, f"Installed {total} APK(s)", "determinate")
         self.log_msg(f"Installed {total} APK(s)")
 
@@ -910,7 +954,12 @@ Log Noisy Endpoints = false
         for i, f in enumerate(files, 1):
             pct = int((i - 1) * 100 / total)
             self.set_progress(pct, 100, f"Pushing bundle {i}/{total}: {f.name}", "determinate")
-            self.adb(["push", str(f), f"{remote}/{f.name}"])
+            try:
+                self.adb(["push", str(f), f"{remote}/{f.name}"])
+            except Exception:
+                self.log_msg(f"Push failed for {f.name}, waiting for device and retrying...")
+                self._wait_for_device()
+                self.adb(["push", str(f), f"{remote}/{f.name}"])
             pct = int(i * 100 / total)
             self.set_progress(pct, 100, f"Pushed {i}/{total}: {f.name}", "determinate")
         self.log_msg(f"Pushed {total} bundle file(s) to {remote}")
