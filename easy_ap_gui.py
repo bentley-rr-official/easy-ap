@@ -516,6 +516,32 @@ class App(tk.Tk):
         except Exception as e:
             self.log_msg(f'NDK bootstrap issue: {e}')
 
+        # baksmali/smali (needed by pairip_strip)
+        def ensure_jar(name, urls):
+            dest = tools / f'{name}.jar'
+            if dest.exists() and dest.stat().st_size > 0:
+                return True
+            for url in urls:
+                try:
+                    self.download_file(url, dest, f'Downloading {name}.jar...')
+                    if dest.exists() and dest.stat().st_size > 10000:
+                        return True
+                except Exception as e:
+                    self.log_msg(f'Failed to download {name} from {url}: {e}')
+                    try: dest.unlink()
+                    except Exception: pass
+            return dest.exists()
+        if not shutil.which('baksmali') and not (tools / 'baksmali.jar').exists():
+            ensure_jar('baksmali', [
+                'https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar',
+                'https://repo1.maven.org/maven2/org/smali/baksmali/2.5.2/baksmali-2.5.2.jar',
+            ])
+        if not shutil.which('smali') and not (tools / 'smali.jar').exists():
+            ensure_jar('smali', [
+                'https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar',
+                'https://repo1.maven.org/maven2/org/smali/smali/2.5.2/smali-2.5.2.jar',
+            ])
+
         # keystore
         ks = tools / 'debug.keystore'
         if not ks.exists():
@@ -549,6 +575,8 @@ class App(tk.Tk):
         if not (tools / 'zipalign').exists() and not shutil.which('zipalign'): missing.append('zipalign (Android build-tools)')
         if not (tools / 'lib' / 'apksigner.jar').exists() and not shutil.which('apksigner'): missing.append('apksigner (Android build-tools)')
         if not (tools / 'debug.keystore').exists(): missing.append('tools/debug.keystore')
+        if not shutil.which('baksmali') and not (tools / 'baksmali.jar').exists(): missing.append('baksmali')
+        if not shutil.which('smali') and not (tools / 'smali.jar').exists(): missing.append('smali')
         ndk = os.environ.get('ANDROID_NDK') or str(Path.home()/'x'/'ndk'/'android-ndk-r27c')
         if not Path(ndk).exists(): missing.append(f'Android NDK r27c (expected at {ndk})')
         try:
