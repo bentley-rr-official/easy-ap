@@ -862,6 +862,16 @@ Log Noisy Endpoints = false
         (patcher / "2025.cfg").write_text(cfg, encoding="utf-8")
         self.log_msg(f"Wrote {patcher / '2025.cfg'}")
 
+    def _infer_package(self, apks):
+        # try to infer package name from base apk filename like com.example.app.apk
+        for a in apks:
+            name = a.stem
+            if name.startswith('config.') or name.startswith('Unity'):
+                continue
+            if '.' in name:
+                return name
+        return self.package or DEFAULT_PACKAGE
+
     def install_apks(self, apks):
         self.set_step("Installing APKs...")
         total = len(apks)
@@ -870,12 +880,24 @@ Log Noisy Endpoints = false
         # Split APKs must be installed together in one transaction
         self.set_progress(0, 100, f"Installing {total} APK(s) (install-multiple)...", "determinate")
         self.log_msg("Installing: " + ", ".join(a.name for a in apks))
+        cmd = ["install-multiple", "-r"] + [str(a) for a in apks]
         try:
-            self.adb(["install-multiple", "-r"] + [str(a) for a in apks])
-        except Exception:
-            # retry with downgrade allowed for convenience
+            self.adb(cmd)
+        except Exception as e:
+            err = str(e)
             self.log_msg("install-multiple failed, retrying with -d (allow downgrade)...")
-            self.adb(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
+            try:
+                self.adb(["install-multiple", "-r", "-d"] + [str(a) for a in apks])
+            except Exception as e2:
+                err2 = str(e2)
+                # signature mismatch -> uninstall existing app then install fresh
+                if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in err or "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in err2 or "signatures do not match" in err2.lower():
+                    pkg = self._infer_package(apks)
+                    self.log_msg(f"Signature mismatch detected. Uninstalling existing package {pkg} and retrying...")
+                    self.adb(["uninstall", pkg], check=False)
+                    self.adb(["install-multiple"] + [str(a) for a in apks])
+                else:
+                    raise
         self.set_progress(100, 100, f"Installed {total} APK(s)", "determinate")
         self.log_msg(f"Installed {total} APK(s)")
 
