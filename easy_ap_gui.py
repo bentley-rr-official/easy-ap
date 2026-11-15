@@ -340,56 +340,45 @@ class App(tk.Tk):
     def bootstrap_android_tools(self, patcher: Path, wd: Path):
         tools = patcher / 'tools'
         tools.mkdir(parents=True, exist_ok=True)
-        need_bt = not ((tools / 'zipalign').exists() or shutil.which('zipalign')) or not ((tools / 'lib' / 'apksigner.jar').exists() or shutil.which('apksigner') or (tools / 'apksigner').exists())
-        if not need_bt:
+        need_za = not ((tools / 'zipalign').exists() or shutil.which('zipalign'))
+        need_apk = not ((tools / 'lib' / 'apksigner.jar').exists() or shutil.which('apksigner') or (tools / 'apksigner').exists())
+        if not (need_za or need_apk):
             return
-        if platform.system().lower() != 'linux':
+        system = platform.system().lower()
+        if system != 'linux':
             self.log_msg('Automatic Android build-tools bootstrap is currently implemented for Linux; please install Android SDK build-tools manually on this OS.')
             return
-        if not shutil.which('java'):
-            self.log_msg('Java required to install Android build-tools; skipping auto-bootstrap.')
-            return
-        sdk = wd / 'android-sdk'
-        cmdtools = sdk / 'cmdline-tools'
-        if not (cmdtools / 'latest' / 'bin' / 'sdkmanager').exists():
-            url = 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip'
-            z = wd / 'cmdline-tools.zip'
-            self.download_file(url, z, 'Downloading Android command-line tools...')
-            tmp = wd / 'cmdtools_extract'
+        # Download build-tools zip directly (simpler and no sdkmanager/license hassles)
+        bt_root = wd / 'android-build-tools'
+        url = 'https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip'
+        z = wd / 'build-tools_r34.0.0-linux.zip'
+        if not bt_root.exists():
+            self.download_file(url, z, 'Downloading Android build-tools...')
+            tmp = wd / 'bt_extract'
             if tmp.exists(): shutil.rmtree(tmp)
-            self.extract_zip(z, tmp, 'Extracting Android command-line tools...')
-            (cmdtools / 'latest').mkdir(parents=True, exist_ok=True)
-            src = tmp / 'cmdline-tools'
-            if src.exists():
-                # move contents into latest
-                for item in src.iterdir():
-                    shutil.move(str(item), str(cmdtools / 'latest' / item.name))
+            self.extract_zip(z, tmp, 'Extracting Android build-tools...')
+            # zip usually contains android-14/ or android-*/ folder
+            candidates = list(tmp.glob('android-*')) + list(tmp.glob('build-tools*'))
+            src = candidates[0] if candidates else (next(tmp.iterdir()) if any(tmp.iterdir()) else None)
+            if not src or not src.exists():
+                raise RuntimeError('Could not locate extracted build-tools directory')
+            if bt_root.exists(): shutil.rmtree(bt_root)
+            shutil.move(str(src), str(bt_root))
             shutil.rmtree(tmp, ignore_errors=True)
-        sdkmanager = cmdtools / 'latest' / 'bin' / 'sdkmanager'
-        env = os.environ.copy()
-        env['ANDROID_SDK_ROOT'] = str(sdk)
-        env['ANDROID_HOME'] = str(sdk)
-        self.set_step('Installing Android build-tools...')
-        self.set_progress(None, None, 'Running sdkmanager (accepting licenses)...', 'indeterminate')
-        try:
-            yes = subprocess.Popen(['bash','-lc','yes | "'+str(sdkmanager)+'" --sdk_root="'+str(sdk)+'" --licenses'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            if yes.stdout:
-                for line in yes.stdout: self.log_msg(line.rstrip())
-            yes.wait()
-        except Exception as e:
-            self.log_msg(f'License acceptance failed: {e}')
-        self.run_cmd([str(sdkmanager), '--sdk_root='+str(sdk), 'platform-tools', 'build-tools;34.0.0'], env=env, check=False)
-        # copy tools
-        bt = sdk / 'build-tools' / '34.0.0'
-        za = bt / 'zipalign'
-        if za.exists() and not (tools / 'zipalign').exists():
-            shutil.copy2(za, tools / 'zipalign'); os.chmod(tools / 'zipalign', 0o755)
-        aj = bt / 'lib' / 'apksigner.jar'
-        if aj.exists() and not (tools / 'lib' / 'apksigner.jar').exists():
+            try: z.unlink()
+            except Exception: pass
+        za = bt_root / 'zipalign'
+        if za.exists():
+            try: os.chmod(za, 0o755)
+            except Exception: pass
+            if need_za and not (tools / 'zipalign').exists():
+                shutil.copy2(za, tools / 'zipalign'); os.chmod(tools / 'zipalign', 0o755)
+                self.log_msg(f'Installed zipalign to {tools / "zipalign"}')
+        aj = bt_root / 'lib' / 'apksigner.jar'
+        if aj.exists() and need_apk and not (tools / 'lib' / 'apksigner.jar').exists():
             (tools / 'lib').mkdir(parents=True, exist_ok=True)
             shutil.copy2(aj, tools / 'lib' / 'apksigner.jar')
-        os.environ['ANDROID_HOME'] = str(sdk)
-        os.environ['ANDROID_SDK_ROOT'] = str(sdk)
+            self.log_msg(f'Installed apksigner.jar to {tools / "lib" / "apksigner.jar"}')
 
     def bootstrap_ndk(self, wd: Path):
         ndk_default = Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'
