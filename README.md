@@ -6,7 +6,7 @@ Automated, user-friendly helper for the **2025 Android Patcher**: downloads requ
 
 - **Revamped blue/white GUI** focused on clear progress and prompts
 - **Terminal logging** for detailed/live technical output (downloads, build, adb, install)
-- **Nameserver validation**: must be a URL starting with `http://` or `https://`
+- **Nameserver validation**: must be a URL starting with `http://` or `https://` (easy-ap extracts the host for the patcher config)
 - **Improved adb/device flow**: device detection, retry/selection, reconnect handling, and clearer guidance
 - **Safer uninstall handling**: if an existing install must be replaced due to signature mismatch, the app asks:  
   **"Are you sure you would like to uninstall Rec Room?"**

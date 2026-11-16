@@ -64,9 +64,17 @@ def fmt_bytes(n: float) -> str:
 def is_valid_nameserver_url(value: str) -> bool:
     try:
         u = urlparse(value.strip())
-        return u.scheme in ("http", "https") and bool(u.netloc)
+        return u.scheme in ("http", "https") and bool(u.hostname)
     except Exception:
         return False
+
+
+def normalize_nameserver_host(url: str) -> str:
+    u = urlparse(url.strip())
+    host = u.hostname or ""
+    if u.port:
+        host = f"{host}:{u.port}"
+    return host
 
 
 class App(tk.Tk):
@@ -78,7 +86,8 @@ class App(tk.Tk):
         self.configure(bg=C_BG)
 
         self.workdir = default_workdir()
-        self.nameserver = ""
+        self.nameserver_url = ""
+        self.nameserver_host = ""
         self.package = DEFAULT_PACKAGE
         self.uiq: queue.Queue = queue.Queue()
         self.selected_device = None
@@ -271,11 +280,13 @@ class App(tk.Tk):
                     parent=self,
                 )
                 if ns is None:
-                    self.nameserver = ""
+                    self.nameserver_url = ""
+                    self.nameserver_host = ""
                     break
                 ns = ns.strip()
                 if is_valid_nameserver_url(ns):
-                    self.nameserver = ns
+                    self.nameserver_url = ns
+                    self.nameserver_host = normalize_nameserver_host(ns)
                     break
                 messagebox.showerror(
                     "Invalid nameserver URL",
@@ -872,14 +883,15 @@ class App(tk.Tk):
 
             self.set_progress(status="Input needed", step="Nameserver", item="Waiting for nameserver URL", item_mode="indeterminate",
                               item_detail="Enter a nameserver URL starting with http:// or https://")
-            self.nameserver = ""
+            self.nameserver_url = ""
+            self.nameserver_host = ""
             self.nameserver_event.clear()
             self.ask_nameserver_ui()
             self.nameserver_event.wait()
-            if not self.nameserver:
+            if not self.nameserver_host:
                 raise self.human_error("Nameserver required", "No valid nameserver URL was provided.",
                                        ["Start again and enter a nameserver URL (http:// or https://)"])
-            self.log(f"Using nameserver: {self.nameserver}")
+            self.log(f"Using nameserver URL: {self.nameserver_url} (configured host: {self.nameserver_host})")
 
             self.set_progress(status="Downloading", step="Step 2/6: Download base.xapk", overall_text="Step 2/6")
             xapk = wd / "base.xapk"
@@ -891,7 +903,7 @@ class App(tk.Tk):
             self.extract_zip(bundles_zip, patcher / "bundles", "Extracting bundles")
             self.set_progress(overall=48, overall_text="Downloads complete")
 
-            cfg = f"""[App]\nPackage Name = \n\n[Server]\nRecNet NameServer Host = {self.nameserver}\nOculus App Id =\n\n[Photon]\nApp Id Realtime =\nApp Id Voice =\nApp Id Chat =\nPhoton NameServer =\nPhoton NameServer Port = 0\n\n[Advanced]\nLog HTTP = true\nDebug = false\nLog HTTP Body Max = 10000\nLog Noisy Endpoints = false\n"""
+            cfg = f"""[App]\nPackage Name = \n\n[Server]\nRecNet NameServer Host = {self.nameserver_host}\nOculus App Id =\n\n[Photon]\nApp Id Realtime =\nApp Id Voice =\nApp Id Chat =\nPhoton NameServer =\nPhoton NameServer Port = 0\n\n[Advanced]\nLog HTTP = true\nDebug = false\nLog HTTP Body Max = 10000\nLog Noisy Endpoints = false\n"""
             (patcher / "2025.cfg").write_text(cfg, encoding="utf-8")
 
             self.set_progress(status="Building", step="Step 4/6: Building", overall=50, overall_text="Step 4/6: Building (watch terminal for live output)",
