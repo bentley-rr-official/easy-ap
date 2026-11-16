@@ -75,7 +75,7 @@ jobs:
           ./appimagetool --appimage-extract-and-run AppDir "RecRoom2025AndroidPatchTool-linux-${ARCH}.AppImage"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RecRoom2025AndroidPatchTool-linux-x86_64-AppImage
           path: RecRoom2025AndroidPatchTool-linux-x86_64.AppImage
