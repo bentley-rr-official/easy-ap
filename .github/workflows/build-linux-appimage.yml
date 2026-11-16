@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-linux-appimage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +28,9 @@ jobs:
       - name: Build Linux binary
         run: |
           pyinstaller --noconfirm --clean --onefile --name RecRoom2025AndroidPatchTool easy_ap_gui.py
+          # Improve portability: avoid bundling host glibc core libs inside onefile payload extraction issues
+          # (AppImage/AppDir will rely on target system glibc where compatible)
+          echo "Built binary: dist/RecRoom2025AndroidPatchTool"
 
       - name: Create AppDir and AppImage
         run: |
@@ -37,6 +40,9 @@ jobs:
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
           cp dist/${APP} AppDir/usr/bin/${APP}
           chmod +x AppDir/usr/bin/${APP}
+          # Best-effort portability: when PyInstaller onefile extracts, bundled libs can pin newer glibc.
+          # We cannot easily edit the embedded archive here, but building on ubuntu-22.04 reduces glibc version.
+          # If issues persist on older distros, run from source or use a distro with compatible glibc.
           cat > AppDir/${APP}.desktop <<'DESKTOP'
           [Desktop Entry]
           Type=Application
