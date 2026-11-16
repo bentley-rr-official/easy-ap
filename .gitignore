@@ -4,5 +4,9 @@ __pycache__/
 /dist/
 /build/
 *.spec
+AppDir/
+*.AppImage
+appimagetool
+recroom-2025-patch-settings.json
 /csharp/**/bin/
 /csharp/**/obj/

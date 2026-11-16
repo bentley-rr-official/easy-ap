@@ -1,32 +1,39 @@
-# Packaging (planned/in-progress)
+# Packaging (Rec Room 2025 Android Patch Tool)
 
-This repository currently ships a working Python/Tkinter app (`easy_ap_gui.py`). Native-style distribution targets requested:
+This repository includes a working Python/Tkinter **Rec Room 2025 Android Patch Tool** (`easy_ap_gui.py`) and GitHub Actions workflows to build distributables:
 
-- Windows: `.exe`
-- Linux: `.AppImage`
+- **Windows `.exe`**: `.github/workflows/build-windows-exe.yml`
+- **Linux `.AppImage`**: `.github/workflows/build-linux-appimage.yml`
 
-## Suggested approach (Python app)
+Artifacts are named for the **Rec Room 2025 Android Patch Tool** (not a generic patcher).
+
+## Automated builds (GitHub Actions)
+- Trigger via **Actions > workflow_dispatch**, or push a tag like `v1.0.0`.
+- Outputs:
+  - `RecRoom2025AndroidPatchTool-windows-x64.zip` (contains `.exe`, README, example settings)
+  - `RecRoom2025AndroidPatchTool-linux-x86_64.AppImage`
+
+## Local build notes
 
 ### Windows `.exe` (PyInstaller)
-1. Install PyInstaller in a clean environment:
-   - `python -m pip install pyinstaller`
-2. Build:
-   - `pyinstaller --noconfirm --onefile --windowed --name easy-ap easy_ap_gui.py`
-3. Test on Windows with USB/adb/build prerequisites available.
+```powershell
+python -m pip install --upgrade pip pyinstaller
+pyinstaller --noconfirm --clean --onefile --windowed --name RecRoom2025AndroidPatchTool easy_ap_gui.py
+```
 
-Notes: Tkinter and bundled runtime behavior should be validated on target Windows versions.
+### Linux `.AppImage` (PyInstaller + appimagetool)
+Build the binary with PyInstaller, create an AppDir (`AppRun`, `.desktop`, icon), then package with `appimagetool` (see `.github/workflows/build-linux-appimage.yml` for the exact CI steps).
 
-### Linux `.AppImage`
-1. Build a Linux binary or bundle with PyInstaller:
-   - `pyinstaller --noconfirm --onefile --name easy-ap easy_ap_gui.py`
-2. Create an AppDir with desktop entry/icon and AppRun wrapper.
-3. Package with `appimagetool` to produce `easy-ap*.AppImage`.
+## Runtime/build dependencies (important)
+Packaging the GUI does **not** bundle the full Rec Room 2025 Android patch build environment. Users still need:
+- Internet access and Android USB debugging/ADB device access
+- Rec Room 2025 patcher build dependencies (Java, Android build-tools/NDK, etc.) as required by the patcher
+- A `bash` environment for `scripts/build-phone.sh`
+  - Linux: usually available
+  - Windows: Git Bash or WSL (configure in app **Settings** if needed)
 
-Notes: the app shells out to `bash` and patcher build tooling; packaged runtime must still have required host dependencies (Java, Android tools/NDK as needed).
+## Customization
+The packaged tool supports customization via `recroom-2025-patch-settings.json` (URLs, package, bundle destination, workdir, adb/bash paths, etc.). See `../recroom-2025-patch-settings.example.json`.
 
 ## Future C# packaging
-When the C# implementation matures, prefer framework-native publishing:
-- Windows: `dotnet publish -c Release -r win-x64 --self-contained true`
-- Linux: `dotnet publish -c Release -r linux-x64 --self-contained true` then AppImage packaging
-
-See `../csharp/README.md`.
+C# rewrite/packaging is planned for later. See `../csharp/README.md`.

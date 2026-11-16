@@ -1,43 +1,61 @@
-# easy-ap
+# Rec Room 2025 Android Patch Tool
 
-Automated, user-friendly helper for the **2025 Android Patcher**: downloads required files, asks for your nameserver, builds the patched app, installs APKs to a selected Android device, and pushes bundles.
+A customizable, user-friendly tool for applying the **Rec Room 2025 Android patch**: it downloads the required patcher/files, asks for your Rec Room nameserver, builds the patched Rec Room 2025 Android APKs, installs them to a selected Android device, and pushes the required bundles.
+
+> This project is specifically for the **Rec Room 2025 Android patch** workflow (not a generic app patcher).
 
 ## Features
 
-- **Revamped blue/white GUI** focused on clear progress and prompts
-- **Terminal logging** for detailed/live technical output (downloads, build, adb, install)
-- **Nameserver validation**: must be a URL starting with `http://` or `https://` (easy-ap extracts the host for the patcher config)
-- **Improved adb/device flow**: device detection, retry/selection, reconnect handling, and clearer guidance
-- **Safer uninstall handling**: if an existing install must be replaced due to signature mismatch, the app asks:  
+- **Blue/white GUI** with clear progress, device prompts, and per-file/per-APK progress bars
+- **Terminal/console logging** for detailed live output (downloads, build, adb, install)
+- **Rec Room-specific flow**: patcher download/build, nameserver setup, APK install, and bundle push for Rec Room 2025
+- **Nameserver URL required**: must start with `http://` or `https://` (the tool extracts and configures the host for the Rec Room 2025 patcher)
+- **Safer uninstall confirmation**: if an existing install must be replaced due to signature mismatch, it asks:  
   **"Are you sure you would like to uninstall Rec Room?"**
-- **Per-file progress**: per-APK install progress and per-bundle upload progress
+- **Customizable settings** via UI and `recroom-2025-patch-settings.json` (URLs, package, work folder, adb/bash commands, bundle destination, auto-start, etc.)
+- **Cross-platform app support**: Python/Tkinter source runs on Linux and Windows; build packaging workflows are provided for Windows `.exe` and Linux `.AppImage`
 
 ## What it does
 
-On start (or **Start / Restart**), the app:
+On start (or **Start / Restart patch process**), the tool:
 
-1. Prepares a clean work directory in the OS temp folder (`/tmp/easy-ap` on Linux/macOS, `%TEMP%\easy-ap` on Windows)
-2. Downloads the patcher (with progress):  
-   `https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip`
-3. Prompts for a **nameserver URL** (`http://` or `https://`), extracts the host, and writes `RecNet NameServer Host` to `2025.cfg`
-4. Downloads `base.xapk` (with progress):  
-   `https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t`
-5. Downloads and extracts `bundles.zip` (with progress):  
-   `https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0&confirm=t`  
-   Bundles are extracted into `<workdir>/2025-android-patcher/bundles/`
-6. Prepares/builds using `scripts/build-phone.sh` on `base.xapk` (bootstraps some dependencies/tools when possible)
-7. Ensures `adb` is available and lets you choose a device if multiple are connected
-8. Installs built APKs to the selected device (with per-APK progress). If a signature mismatch requires uninstall, it asks for confirmation first
-9. Pushes bundles to:  
+1. Prepares a work folder (default: OS temp folder, configurable)
+2. Downloads the **Rec Room 2025 Android patcher** (`2025-android-patcher`) from the configured URL
+3. Prompts for your **Rec Room 2025 nameserver URL** (`http://`/`https://`) and writes `RecNet NameServer Host` + `Asset Pack Stub = true` to `2025.cfg`
+4. Downloads the Rec Room `base.xapk` and bundles archive
+5. Extracts bundles into the patcher workspace and runs the Rec Room 2025 patch build (`scripts/build-phone.sh`)
+6. Ensures `adb` is available, detects/selects your Android device, and handles reconnect/retry cases
+7. Installs patched APKs with per-APK progress (with confirmation before uninstalling existing Rec Room if signatures differ)
+8. Pushes Rec Room 2025 bundles to the device (default):  
    `/sdcard/Android/data/com.AgainstGravity.RecRoom/files/AssetPackStubs/OutfitsAssetPack/`
+
+## Customization
+
+- Click **Settings** in the app to customize:
+  - Patcher/XAPK/bundles download URLs
+  - Package name and bundle destination path on device
+  - Work directory
+  - ADB command/path
+  - Bash command/path (important on Windows)
+  - Default nameserver URL, auto-start, clean-workdir behavior
+- Settings are saved to `recroom-2025-patch-settings.json` next to the app/script.
+- See `recroom-2025-patch-settings.example.json` for all available options.
 
 ## Requirements
 
-- **Python 3 + Tkinter** (current implementation)
-- `bash` (required for the patcher build script on Linux/macOS; Windows build support depends on environment/tooling)
+### To run from source
+- **Python 3 + Tkinter**
 - Internet access for downloads
-- **Build toolchain required by the patcher** (Java, Android build-tools/NDK, signing tools, etc.). The app attempts to bootstrap some dependencies on first run, but setup can be slow and platform-dependent.
-- Android device with **USB debugging** enabled for install/push
+- Android device with **USB debugging** enabled
+
+### To build the Rec Room 2025 Android patch
+- The Rec Room 2025 patcher build requirements (Java, Android build-tools/NDK, signing tools, etc.)
+- A `bash` environment to run `scripts/build-phone.sh`
+  - **Linux:** usually available by default
+  - **Windows:** install **Git Bash** or **WSL** and set the Bash command in **Settings** if auto-detection is not sufficient
+- `adb` / Android platform-tools (the tool can attempt to download platform-tools automatically)
+
+> Building the Rec Room 2025 Android patch can take a long time (especially first-run dependency downloads). Keep the terminal/console open for live build logs.
 
 ## Run (source)
 
@@ -45,13 +63,18 @@ On start (or **Start / Restart**), the app:
 python3 easy_ap_gui.py
 ```
 
-## Packaging (`.exe` / `.AppImage`) and future C# rewrite
+## Windows / Linux builds (`.exe` / `.AppImage`)
 
-- **Windows `.exe` / Linux `.AppImage`**: not packaged in-repo yet. The current app is Python/Tkinter and can be packaged with tools like PyInstaller (Windows/Linux) and an AppImage bundling step on Linux (packaging scripts/config to be added).
-- **C# (planned)**: a future C# implementation/skeleton is planned for easier editing and native building/packaging. See `csharp/README.md` for the migration/build plan scaffold.
+GitHub Actions workflows are included to build distributables:
+
+- `.github/workflows/build-windows-exe.yml` → **Windows `.exe`** (PyInstaller, artifact zip)
+- `.github/workflows/build-linux-appimage.yml` → **Linux `.AppImage`** (PyInstaller + appimagetool)
+
+You can trigger them via **workflow_dispatch** or by pushing a version tag (`v*`). Build artifacts are uploaded from the workflow runs.
 
 ## Notes
 
-- The app cleans/recreates its temp work directory each run.
-- Large downloads/builds (NDK, build-tools, patch build) can take a long time; keep the terminal open for live logs.
+- The tool can clean/recreate its work folder each run (configurable).
+- Download URLs and paths are customizable for your Rec Room 2025 patch setup/mirrors.
 - Review downloaded code/files and use at your own risk.
+- **C# rewrite:** planned for later (scaffold/docs remain in `csharp/`), but not part of this update.

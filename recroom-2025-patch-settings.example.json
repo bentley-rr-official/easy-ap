@@ -1,0 +1,15 @@
+{
+  "app_title": "Rec Room 2025 Android Patch Tool",
+  "patch_zip_url": "https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip",
+  "xapk_url": "https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t",
+  "bundles_url": "https://drive.usercontent.google.com/download?id=1o42Q81c9G_fNceEiXSfHEOFjUPx23z6E&export=download&authuser=0&confirm=t",
+  "package_name": "com.AgainstGravity.RecRoom",
+  "remote_bundles_dir": "/sdcard/Android/data/{package}/files/AssetPackStubs/OutfitsAssetPack",
+  "workdir": "",
+  "bash_command": "",
+  "adb_command": "",
+  "auto_start": true,
+  "clean_workdir": true,
+  "default_nameserver_url": "",
+  "pairip_keep_startup": "0"
+}
