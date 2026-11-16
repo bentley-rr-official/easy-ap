@@ -903,7 +903,7 @@ class App(tk.Tk):
             self.extract_zip(bundles_zip, patcher / "bundles", "Extracting bundles")
             self.set_progress(overall=48, overall_text="Downloads complete")
 
-            cfg = f"""[App]\nPackage Name = \n\n[Server]\nRecNet NameServer Host = {self.nameserver_host}\nOculus App Id =\n\n[Photon]\nApp Id Realtime =\nApp Id Voice =\nApp Id Chat =\nPhoton NameServer =\nPhoton NameServer Port = 0\n\n[Advanced]\nLog HTTP = true\nDebug = false\nLog HTTP Body Max = 10000\nLog Noisy Endpoints = false\n"""
+            cfg = f"""[App]\nPackage Name = \n\n[Server]\nRecNet NameServer Host = {self.nameserver_host}\nOculus App Id =\n\n[Photon]\nApp Id Realtime =\nApp Id Voice =\nApp Id Chat =\nPhoton NameServer =\nPhoton NameServer Port = 0\n\n[Advanced]\nLog HTTP = true\nDebug = false\nLog HTTP Body Max = 10000\nLog Noisy Endpoints = false\nAsset Pack Stub = true\n"""
             (patcher / "2025.cfg").write_text(cfg, encoding="utf-8")
 
             self.set_progress(status="Building", step="Step 4/6: Building", overall=50, overall_text="Step 4/6: Building (watch terminal for live output)",
