@@ -725,6 +725,199 @@ class App(tk.Tk):
             return
         self.run_cmd(bash + [str(script)] + [str(a) for a in args], cwd=cwd, env=env)
 
+    # ---------- build env (bootstraps) ----------
+    def find_tool(self, name):
+        p = shutil.which(name)
+        if p: return Path(p)
+        home = Path.home()
+        roots = [os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), str(home/'Android/Sdk'), str(self.workdir/'android-sdk'), '/usr/lib/android-sdk']
+        for root in roots:
+            if not root: continue
+            r = Path(root)
+            for c in list(r.glob(f'build-tools/*/{name}')) + list(r.glob(f'build-tools/*/lib/{name}')):
+                if c.exists(): return c
+        return None
+
+    def ensure_python_deps_env(self, wd: Path):
+        venv = wd / 'venv'
+        py = venv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+        if not py.exists():
+            self.log('Creating Python virtual environment for Rec Room 2025 patch build dependencies...')
+            self.run_cmd([sys.executable, '-m', 'venv', str(venv)])
+        try:
+            self.run_cmd([str(py), '-c', 'import lief'], check=True, capture=True)
+        except Exception:
+            self.log('Installing lief in venv...')
+            self.run_cmd([str(py), '-m', 'pip', 'install', '--upgrade', 'pip'], check=False)
+            self.run_cmd([str(py), '-m', 'pip', 'install', 'lief'], check=False)
+        bin_dir = str(venv / ('Scripts' if os.name == 'nt' else 'bin'))
+        os.environ['PATH'] = bin_dir + os.pathsep + os.environ.get('PATH', '')
+
+    def bootstrap_android_tools(self, patcher: Path, wd: Path):
+        tools = patcher / 'tools'
+        tools.mkdir(parents=True, exist_ok=True)
+        need_za = not ((tools / 'zipalign').exists() or shutil.which('zipalign'))
+        need_apk = not ((tools / 'lib' / 'apksigner.jar').exists() or shutil.which('apksigner'))
+        if not (need_za or need_apk): return
+        if platform.system().lower() != 'linux':
+            self.log('Automatic Android build-tools bootstrap is currently supported on Linux; ensure zipalign/apksigner are installed and available.')
+            return
+        bt_root = wd / 'android-build-tools'
+        urls = [
+            'https://dl.google.com/android/repository/build-tools_r34-linux.zip',
+            'https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip',
+        ]
+        z = wd / 'build-tools-linux.zip'
+        if not bt_root.exists():
+            last_err = None
+            for url in urls:
+                try:
+                    self.download_file(url, z, 'Downloading Android build-tools...')
+                    tmp = wd / 'bt_extract'
+                    if tmp.exists(): shutil.rmtree(tmp)
+                    self.extract_zip(z, tmp, 'Extracting Android build-tools...')
+                    candidates = list(tmp.glob('android-*')) + [d for d in tmp.iterdir() if d.is_dir()]
+                    src = candidates[0] if candidates else None
+                    if not src: raise RuntimeError('Could not locate extracted build-tools directory')
+                    if bt_root.exists(): shutil.rmtree(bt_root)
+                    shutil.move(str(src), str(bt_root))
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    try: z.unlink()
+                    except Exception: pass
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+            if last_err: raise last_err
+        za = bt_root / 'zipalign'
+        if za.exists() and need_za and not (tools / 'zipalign').exists():
+            try: os.chmod(za, 0o755)
+            except Exception: pass
+            wrapper = tools / 'zipalign'
+            wrapper.write_text(f'#!/usr/bin/env bash\nexec "{za}" "$@"\n', encoding='utf-8')
+            os.chmod(wrapper, 0o755)
+        aj = bt_root / 'lib' / 'apksigner.jar'
+        if aj.exists() and need_apk and not (tools / 'lib' / 'apksigner.jar').exists():
+            (tools / 'lib').mkdir(parents=True, exist_ok=True)
+            shutil.copy2(aj, tools / 'lib' / 'apksigner.jar')
+
+    def _fix_ndk_layout(self, root: Path):
+        for p in root.rglob('*'):
+            try:
+                if p.is_symlink() or not p.is_file():
+                    continue
+                sp = str(p)
+                if ('/bin/' in sp or '/prebuilt/' in sp or '/lib' in sp) and p.stat().st_size <= 4096:
+                    try:
+                        data = p.read_bytes()
+                        if b'\x00' not in data:
+                            s = data.decode('utf-8', 'ignore').strip()
+                            if s and '\n' not in s and ' ' not in s and len(s) < 255:
+                                target = p.parent / s
+                                if target.exists() or (p.parent / Path(s).name).exists():
+                                    try:
+                                        p.unlink(); os.symlink(s, p); continue
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                if '/bin/' in sp or '/prebuilt/' in sp:
+                    try: p.chmod(p.stat().st_mode | 0o111)
+                    except Exception: pass
+            except Exception:
+                pass
+
+    def bootstrap_ndk(self, wd: Path):
+        ndk_path = Path(os.environ.get('ANDROID_NDK') or (Path.home() / 'x' / 'ndk' / 'android-ndk-r27c'))
+        clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++'
+        real_clang = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/clang'
+        def ok_ndk():
+            if not (clang.exists() and os.access(clang, os.X_OK)): return False
+            if real_clang.exists() and not real_clang.is_symlink():
+                try:
+                    if real_clang.stat().st_size < 4096 and b'\x00' not in real_clang.read_bytes(): return False
+                except Exception: pass
+            return True
+        if ndk_path.exists() and not ok_ndk():
+            self._fix_ndk_layout(ndk_path)
+        if ok_ndk():
+            os.environ['ANDROID_NDK'] = str(ndk_path)
+            return
+        if ndk_path.exists():
+            try: shutil.rmtree(ndk_path)
+            except Exception: pass
+        if platform.system().lower() != 'linux':
+            self.log('Automatic Android NDK bootstrap is currently supported on Linux; ensure ANDROID_NDK is configured.')
+            return
+        ndk_path.parent.mkdir(parents=True, exist_ok=True)
+        url = 'https://dl.google.com/android/repository/android-ndk-r27c-linux.zip'
+        z = wd / 'android-ndk-r27c-linux.zip'
+        self.download_file(url, z, 'Downloading Android NDK r27c (large download)...')
+        tmp = wd / 'ndk_extract'
+        if tmp.exists(): shutil.rmtree(tmp)
+        self.extract_zip(z, tmp, 'Extracting Android NDK r27c...')
+        extracted = tmp / 'android-ndk-r27c'
+        if not extracted.exists():
+            dirs = [d for d in tmp.iterdir() if d.is_dir()]
+            extracted = dirs[0] if dirs else extracted
+        if ndk_path.exists(): shutil.rmtree(ndk_path)
+        shutil.move(str(extracted), str(ndk_path))
+        shutil.rmtree(tmp, ignore_errors=True)
+        try: z.unlink()
+        except Exception: pass
+        self._fix_ndk_layout(ndk_path)
+        os.environ['ANDROID_NDK'] = str(ndk_path)
+
+    def prepare_build_env(self, patcher: Path):
+        self.set_progress(step='Preparing Rec Room 2025 patch build environment', item='Setting up tools and dependencies', item_mode='indeterminate', item_detail='This may take a while on first run')
+        wd = self.workdir
+        tools = patcher / 'tools'
+        tools.mkdir(parents=True, exist_ok=True)
+        try: self.ensure_python_deps_env(wd)
+        except Exception as e: self.log(f'Python env setup issue: {e}')
+        try: self.bootstrap_android_tools(patcher, wd)
+        except Exception as e: self.log(f'Build-tools setup issue: {e}')
+        try: self.bootstrap_ndk(wd)
+        except Exception as e: self.log(f'NDK setup issue: {e}')
+        def ensure_jar(name, urls):
+            dest = tools / f'{name}.jar'
+            if dest.exists() and dest.stat().st_size > 0: return
+            for url in urls:
+                try:
+                    self.download_file(url, dest, f'Downloading {name}.jar...')
+                    if dest.exists() and dest.stat().st_size > 10000: return
+                except Exception as e:
+                    self.log(f'Failed {name} from {url}: {e}')
+                    try: dest.unlink()
+                    except Exception: pass
+        if not shutil.which('baksmali') and not (tools/'baksmali.jar').exists():
+            ensure_jar('baksmali', ['https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar'])
+        if not shutil.which('smali') and not (tools/'smali.jar').exists():
+            ensure_jar('smali', ['https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar'])
+        ks = tools / 'debug.keystore'
+        if not ks.exists() and shutil.which('keytool'):
+            mk = patcher / 'scripts' / 'make-keystore.sh'
+            if mk.exists():
+                try:
+                    self.run_bash_script(mk, cwd=patcher)
+                except Exception as e:
+                    self.log(f'Keystore generation issue: {e}')
+        missing = []
+        if not shutil.which('java'): missing.append('Java (JDK/JRE)')
+        if not (tools / 'zipalign').exists() and not shutil.which('zipalign'): missing.append('Android build-tools (zipalign)')
+        if not (tools / 'lib' / 'apksigner.jar').exists() and not shutil.which('apksigner'): missing.append('Android build-tools (apksigner)')
+        if not (tools / 'debug.keystore').exists(): missing.append('Signing keystore (keytool)')
+        ndk = Path(os.environ.get('ANDROID_NDK') or (Path.home()/'x'/'ndk'/'android-ndk-r27c'))
+        if not (ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++').exists():
+            missing.append('Android NDK r27c')
+        if missing:
+            raise self.human_error(
+                "Rec Room 2025 patch build dependencies are missing",
+                "Some required tools could not be installed automatically:\n- " + "\n- ".join(missing),
+                ["Install Java and Android build-tools/NDK, then try again", "On Linux, first-run setup can download large tools (NDK/build-tools)", "On Windows, install required tools and ensure bash/build environment is configured", "Check the terminal/console log for detailed setup errors"]
+            )
+        self.log('Rec Room 2025 patch build environment ready.')
+
     # ---------- install / push ----------
     def _infer_package(self, apks):
         for a in apks:
@@ -948,10 +1141,14 @@ Asset Pack Stub = true
             (patcher / "2025.cfg").write_text(cfg, encoding="utf-8")
 
             self.set_progress(status="Building", step="Step 4/6: Building Rec Room 2025 Android patch", overall=50, overall_text="Step 4/6: Building (watch terminal for live output)",
-                              item="Preparing Rec Room 2025 patch build", item_mode="indeterminate", item_detail="Compiling and patching Rec Room 2025 Android APKs")
+                              item="Preparing Rec Room 2025 patch build", item_mode="indeterminate", item_detail="Setting up tools and compiling Rec Room 2025 Android APKs")
+            self.prepare_build_env(patcher)
             env = os.environ.copy()
             env["CONFIG"] = str(patcher / "2025.cfg")
             env.setdefault("PAIRIP_KEEP_STARTUP", str(self.settings.get("pairip_keep_startup", "0")))
+            vbin = self.workdir / 'venv' / ('Scripts' if os.name == 'nt' else 'bin')
+            if vbin.exists():
+                env['PATH'] = str(vbin) + os.pathsep + env.get('PATH', '')
             for k in ('ANDROID_NDK','ANDROID_HOME','ANDROID_SDK_ROOT','JAVA_HOME'):
                 if os.environ.get(k): env[k] = os.environ[k]
             build_script = patcher / "scripts" / "build-phone.sh"
@@ -963,7 +1160,7 @@ Asset Pack Stub = true
                 self.run_bash_script(build_script, cwd=patcher, env=env, args=[xapk])
             except Exception as e:
                 raise self.human_error("Rec Room 2025 Android patch build failed", str(e),
-                                       ["Review the terminal/console output above for the specific build error", "On Windows, install Git Bash or WSL and/or set the Bash command in Settings", "Make sure required build dependencies are installed (Java, Android build-tools/NDK, bash environment)", "Check available disk space and try again"])
+                                       ["Review the terminal/console output above for the specific build error", "On Windows, install Git Bash or WSL and/or set the Bash command in Settings", "Make sure required build dependencies are installed (Java, Android tools/NDK, bash environment)", "Check available disk space and try again"])
             self.set_progress(overall=78, overall_text="Rec Room 2025 Android patch build complete")
 
             self.ensure_adb()
