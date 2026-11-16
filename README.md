@@ -19,7 +19,7 @@ On start (or **Start / Restart**), the app:
 1. Prepares a clean work directory in the OS temp folder (`/tmp/easy-ap` on Linux/macOS, `%TEMP%\easy-ap` on Windows)
 2. Downloads the patcher (with progress):  
    `https://github.com/bentley-rr-official/2025-android-patcher/archive/refs/heads/main.zip`
-3. Prompts for a **nameserver URL** (`http://` or `https://`) and writes `RecNet NameServer Host` to `2025.cfg`
+3. Prompts for a **nameserver URL** (`http://` or `https://`), extracts the host, and writes `RecNet NameServer Host` to `2025.cfg`
 4. Downloads `base.xapk` (with progress):  
    `https://drive.usercontent.google.com/download?id=1k9ASR35hKhZX4QftctMHmuJCWRG2s04p&export=download&authuser=0&confirm=t`
 5. Downloads and extracts `bundles.zip` (with progress):  
