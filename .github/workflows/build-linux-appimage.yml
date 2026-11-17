@@ -1,0 +1,83 @@
+name: Build Linux AppImage (2025RR)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux-appimage:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.15'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk desktop-file-utils file wget
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+
+      - name: Build Linux binary
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name 2025RR easy_ap_gui.py
+          # Improve portability: avoid bundling host glibc core libs inside onefile payload extraction issues
+          # (AppImage/AppDir will rely on target system glibc where compatible)
+          echo "Built binary: dist/2025RR"
+
+      - name: Create AppDir and AppImage
+        run: |
+          set -euo pipefail
+          APP=2025RR
+          ARCH=linux-amd64
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp dist/${APP} AppDir/usr/bin/${APP}
+          chmod +x AppDir/usr/bin/${APP}
+          # Best-effort portability: when PyInstaller onefile extracts, bundled libs can pin newer glibc.
+          # We cannot easily edit the embedded archive here, but building on ubuntu-22.04 reduces glibc version.
+          # If issues persist on older distros, run from source or use a distro with compatible glibc.
+          cat > AppDir/${APP}.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=2025RR
+          Comment=Download, build, install, and push bundles for 2025RR
+          Exec=2025RR
+          Icon=2025rr
+          Categories=Utility;Development;
+          Terminal=false
+          DESKTOP
+          cp AppDir/${APP}.desktop AppDir/usr/share/applications/${APP}.desktop
+          # Simple placeholder icon (solid PNG generated via Python)
+          python - <<'PY'
+          import struct,zlib
+          w=h=256
+          def chunk(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+          raw=b''.join(b'\x00'+bytes((30,136,229,255))*w for _ in range(h))
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(raw,9))+chunk(b'IEND',b'')
+          open('AppDir/2025rr.png','wb').write(png)
+          open('AppDir/usr/share/icons/hicolor/256x256/apps/2025rr.png','wb').write(png)
+          PY
+          cat > AppDir/AppRun <<'APPRUN'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/2025RR" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+          wget -q -O appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract-and-run AppDir "2025RR-${ARCH}.AppImage"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: 2025RR-linux-amd64-AppImage
+          path: 2025RR-linux-amd64.AppImage
