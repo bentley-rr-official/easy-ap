@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.DS_Store
+/dist/
+/build/
+*.spec
+AppDir/
+*.AppImage
+appimagetool
+recroom-2025-patch-settings.json
+/csharp/**/bin/
+/csharp/**/obj/
+
+2025rr-settings.json
+
+recroom-crash.log
