@@ -64,6 +64,12 @@ def tool_cache_dir() -> Path:
     return base / "2025rr" / "tools"
 
 
+def download_cache_dir() -> Path:
+    d = tool_cache_dir().parent / "downloads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def default_workdir() -> Path:
     env = os.environ.get("RR2025_PATCH_WORKDIR") or os.environ.get("EASY_AP_WORKDIR")
     if env:
@@ -1731,29 +1737,30 @@ class App(tk.Tk):
         remote_tmp = '/data/local/tmp/2025rr_install'
         total = len(apks)
 
-        for attempt in range(2):
-            try:
-                self.adb(['shell', 'rm', '-rf', remote_tmp], check=False, timeout=30)
-                self.adb(['shell', 'mkdir', '-p', remote_tmp], check=True, timeout=30)
-                break
-            except Exception as e:
-                self.log(f'Device temp setup issue ({e}); retrying...')
-                self._wait_for_device()
-        else:
+        def ensure_remote_tmp():
+            for attempt in range(2):
+                try:
+                    self.adb(['shell', 'rm', '-rf', remote_tmp], check=False, timeout=30)
+                    self.adb(['shell', 'mkdir', '-p', remote_tmp], check=True, timeout=30)
+                    return
+                except Exception as e:
+                    self.log(f'Device temp setup issue ({e}); retrying...')
+                    self._wait_for_device()
             self.adb(['shell', 'mkdir', '-p', remote_tmp], check=True, timeout=30)
 
-        for i, apk in enumerate(apks, 1):
-            size = apk.stat().st_size
-            self.set_progress(item=f'APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=0,
-                              item_detail=f'Copying to device ({fmt_bytes(size)})')
-            self.log(f'Pushing APK {i}/{total}: {apk.name} ({fmt_bytes(size)})')
-            try:
-                self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
-            except Exception:
-                self._wait_for_device()
-                self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False, timeout=30)
-                self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
-            self.set_progress(item_value=100, item_detail=f'Copied {apk.name}')
+        def push_all_apks():
+            for i, apk in enumerate(apks, 1):
+                size = apk.stat().st_size
+                self.set_progress(item=f'APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=0,
+                                  item_detail=f'Copying to device ({fmt_bytes(size)})')
+                self.log(f'Pushing APK {i}/{total}: {apk.name} ({fmt_bytes(size)})')
+                try:
+                    self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
+                except Exception:
+                    self._wait_for_device()
+                    self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False, timeout=30)
+                    self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
+                self.set_progress(item_value=100, item_detail=f'Copied {apk.name}')
 
         def create_session():
             total_size = sum(a.stat().st_size for a in apks)
@@ -1772,41 +1779,39 @@ class App(tk.Tk):
         def commit_session(session):
             return self.adb(['shell', 'pm', 'install-commit', session], capture=True, check=False)
 
-        self.set_progress(item='Creating install session', item_mode='indeterminate', item_detail='Preparing package manager session...')
-        session = create_session()
-
-        try:
+        def install_attempt():
+            ensure_remote_tmp()
+            push_all_apks()
+            self.set_progress(item='Creating install session', item_mode='indeterminate', item_detail='Preparing package manager session...')
+            session = create_session()
             for i, apk in enumerate(apks, 1):
                 self.set_progress(item=f'APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=30, item_detail='Adding APK to install session...')
                 remote = f'{remote_tmp}/{apk.name}'
                 self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, remote], check=False)
                 self.set_progress(item_value=100, item_detail=f'Added {apk.name}')
-
             self.set_progress(item='Finalizing 2025RR patch installation', item_mode='indeterminate', item_detail='Committing install on device (large apps can take a while)...')
-            out = commit_session(session)
+            return commit_session(session)
+
+        def uninstall_existing():
+            self.set_progress(item='Uninstalling existing Rec Room app', item_mode='indeterminate', item_detail=f'Removing {pkg} from device...')
+            self.adb(['uninstall', pkg], check=False, timeout=120)
+
+        try:
+            out = install_attempt()
             if 'Success' not in out:
+                # Retry by uninstalling existing app when possible (helps signature/storage/update conflicts)
                 if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in out or 'signatures do not match' in (out or '').lower():
                     if not self.confirm_uninstall(pkg):
                         raise self.human_error("Installation cancelled", f"{pkg} is already installed with a different signature and must be removed to continue.",
-                                               ["Uninstall the existing Rec Room app from your device, then run again", "Or allow the 2025RR to uninstall it when prompted"])
+                                               ["Uninstall the existing Rec Room app from your device, then run again", "Or allow 2025RR to uninstall it when prompted"])
                     self.log(f'User confirmed uninstall of {pkg}')
-                    self.set_progress(item='Uninstalling existing Rec Room app', item_mode='indeterminate', item_detail=f'Removing {pkg} from device...')
-                    self.adb(['uninstall', pkg], check=False, timeout=120)
-                    self.adb(['shell', 'mkdir', '-p', remote_tmp], check=False, timeout=30)
-                    for i, apk in enumerate(apks, 1):
-                        self.set_progress(item=f'APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=0, item_detail='Copying to device...')
-                        self.adb(['push', str(apk), f'{remote_tmp}/{apk.name}'])
-                        self.set_progress(item_value=100)
-                    session = create_session()
-                    for i, apk in enumerate(apks, 1):
-                        self.set_progress(item=f'APK {i}/{total}: {apk.name}', item_mode='determinate', item_value=30, item_detail='Adding APK to install session...')
-                        self.adb(['shell', 'pm', 'install-write', '-S', str(apk.stat().st_size), session, apk.name, f'{remote_tmp}/{apk.name}'], check=False)
-                        self.set_progress(item_value=100)
-                    self.set_progress(item='Finalizing 2025RR patch installation', item_mode='indeterminate', item_detail='Committing reinstall...')
-                    out = commit_session(session)
+                else:
+                    self.log(f'Install failed, attempting uninstall+retry: {(out or "").strip()}')
+                uninstall_existing()
+                out = install_attempt()
                 if 'Success' not in out:
                     raise self.human_error("2025RR patch install failed", (out or '').strip() or "Install did not complete successfully.",
-                                           ["Keep the device connected and unlocked during installation", "Ensure there is enough free storage on the device", "If a store version of Rec Room is installed, uninstall it and try again"])
+                                           ["Keep the device connected and unlocked during installation", "Ensure there is enough free storage on the device", "If needed, uninstall the existing Rec Room app from your device and try again", "Free up device storage and retry"])
         finally:
             try:
                 self.adb(['shell', 'rm', '-rf', remote_tmp], check=False, timeout=30)
@@ -1900,8 +1905,11 @@ class App(tk.Tk):
             self.log(f"Using nameserver URL: {self.nameserver_url} (configured host: {self.nameserver_host})")
 
             self.set_progress(status="Downloading", step="Step 2/6: Downloading Rec Room base package (base.xapk)", overall_text="Step 2/6")
+            cache_dir = download_cache_dir()
+            xapk_cache = cache_dir / "base.xapk"
             xapk = wd / "base.xapk"
             local_candidates = [
+                xapk_cache,
                 app_base_dir() / "base.xapk",
                 Path.cwd() / "base.xapk",
                 Path.home() / "Downloads" / "base.xapk",
@@ -1909,18 +1917,24 @@ class App(tk.Tk):
             used_local = None
             for cand in local_candidates:
                 try:
-                    if cand.exists() and cand.resolve() != xapk.resolve() and cand.stat().st_size >= 50 * 1024 * 1024:
-                        shutil.copy2(cand, xapk)
+                    if cand.exists() and cand.stat().st_size >= 50 * 1024 * 1024:
+                        if cand.resolve() != xapk.resolve():
+                            shutil.copy2(cand, xapk)
                         used_local = cand
                         break
                 except Exception:
                     continue
             if used_local:
-                self.log(f"Using local base.xapk: {used_local}")
-                self.set_progress(item="Using local base.xapk", item_mode="determinate", item_value=100, item_detail=f"Found local file ({fmt_bytes(xapk.stat().st_size)})", overall=30)
+                self.log(f"Using local/cached base.xapk: {used_local}")
+                self.set_progress(item="Using local/cached base.xapk", item_mode="determinate", item_value=100, item_detail=f"Found file ({fmt_bytes(xapk.stat().st_size)})", overall=30)
             else:
                 try:
                     self.download_file(XAPK_URL, xapk, "Downloading Rec Room base package (base.xapk)", 10, 20, min_size=50 * 1024 * 1024)
+                    try:
+                        shutil.copy2(xapk, xapk_cache)
+                        self.log(f"Cached base.xapk for future runs: {xapk_cache}")
+                    except Exception as ce:
+                        self.log(f"Could not cache base.xapk: {ce}")
                 except Exception as e:
                     msg = str(e)
                     self.log(f"Automatic base.xapk download failed: {msg}")
@@ -1935,6 +1949,10 @@ class App(tk.Tk):
                             if not p.exists() or p.stat().st_size < 50 * 1024 * 1024:
                                 raise RuntimeError("Selected file is missing or too small to be a valid base.xapk.")
                             shutil.copy2(p, xapk)
+                            try:
+                                shutil.copy2(xapk, xapk_cache)
+                            except Exception:
+                                pass
                             self.log(f"Using selected base.xapk: {p}")
                             self.set_progress(status="Downloading", step="Step 2/6: Rec Room base package ready", overall=30, overall_text="Using local base.xapk",
                                               item="Using selected base.xapk", item_mode="determinate", item_value=100, item_detail=f"Loaded {fmt_bytes(xapk.stat().st_size)}")
@@ -1955,8 +1973,27 @@ class App(tk.Tk):
                         raise
 
             self.set_progress(status="Downloading", step="Step 3/6: Downloading Rec Room bundles", overall_text="Step 3/6")
+            bundles_cache = cache_dir / "bundles.zip"
             bundles_zip = wd / "bundles.zip"
-            self.download_file(BUNDLES_URL, bundles_zip, "Downloading Rec Room bundles", 30, 15, min_size=1024 * 1024)
+            if bundles_cache.exists() and bundles_cache.stat().st_size >= 1024 * 1024:
+                try:
+                    shutil.copy2(bundles_cache, bundles_zip)
+                    self.log(f"Using cached bundles.zip: {bundles_cache}")
+                    self.set_progress(item="Using cached bundles.zip", item_mode="determinate", item_value=100,
+                                      item_detail=f"Found cached file ({fmt_bytes(bundles_zip.stat().st_size)})", overall=45)
+                except Exception:
+                    self.download_file(BUNDLES_URL, bundles_zip, "Downloading Rec Room bundles", 30, 15, min_size=1024 * 1024)
+                    try:
+                        shutil.copy2(bundles_zip, bundles_cache)
+                    except Exception:
+                        pass
+            else:
+                self.download_file(BUNDLES_URL, bundles_zip, "Downloading Rec Room bundles", 30, 15, min_size=1024 * 1024)
+                try:
+                    shutil.copy2(bundles_zip, bundles_cache)
+                    self.log(f"Cached bundles.zip for future runs: {bundles_cache}")
+                except Exception as ce:
+                    self.log(f"Could not cache bundles.zip: {ce}")
             self.extract_zip(bundles_zip, patcher / "bundles", "Extracting Rec Room bundles")
             self.set_progress(overall=48, overall_text="Downloads complete")
 
