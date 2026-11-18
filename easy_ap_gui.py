@@ -963,7 +963,13 @@ class App(tk.Tk):
             p = Path(path_str)
             s = str(p).lower().replace('/', '\\')
             windir = os.environ.get('WINDIR', r'C:\Windows').lower().replace('/', '\\')
-            return s.endswith('\\system32\\bash.exe') and s.startswith(windir)
+            localapp = os.environ.get('LOCALAPPDATA', '').lower().replace('/', '\\')
+            if s.endswith('\\system32\\bash.exe') and s.startswith(windir):
+                return True
+            # Windows App Execution Alias for WSL bash (e.g. %LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe)
+            if s.endswith('\\windowsapps\\bash.exe') and (not localapp or localapp in s or '\\microsoft\\windowsapps\\' in s):
+                return True
+            return False
         except Exception:
             return False
 
@@ -1076,9 +1082,15 @@ class App(tk.Tk):
         if custom:
             parts = split_cmd(custom)
             if parts and (Path(parts[0]).exists() or shutil.which(parts[0])):
+                if os.name == "nt" and len(parts) == 1 and self._is_wsl_system_bash(parts[0]):
+                    git_bash = self._find_git_bash_windows()
+                    if git_bash:
+                        return [git_bash]
+                    if shutil.which("wsl") or shutil.which("wsl.exe"):
+                        return ["wsl", "bash"]
                 return parts
         if os.name == "nt":
-            # Prefer Git Bash (installed or auto-downloaded portable) over WSL System32 bash
+            # Prefer Git Bash (installed or auto-downloaded portable) over WSL app-alias/system bash
             git_bash = self._find_git_bash_windows()
             for cand in ["bash", "bash.exe"]:
                 p = shutil.which(cand)
@@ -1088,7 +1100,7 @@ class App(tk.Tk):
                             return [git_bash]
                         if shutil.which("wsl") or shutil.which("wsl.exe"):
                             return ["wsl", "bash"]
-                        return [p]
+                        continue
                     return [p]
             if git_bash:
                 return [git_bash]
@@ -1129,7 +1141,7 @@ class App(tk.Tk):
                     use_wsl = True
         if use_wsl:
             def wsl_path(p):
-                s = str(p)
+                s = os.path.abspath(str(p))
                 m = re.match(r"^([A-Za-z]):[\\/](.*)$", s)
                 if m:
                     drive = m.group(1).lower()
@@ -1146,7 +1158,7 @@ class App(tk.Tk):
                 else:
                     args_w.append(sa)
             quoted = " ".join(shlex.quote(x) for x in [script_w] + args_w)
-            wsl_exe = "wsl.exe" if shutil.which("wsl.exe") else "wsl"
+            wsl_exe = shutil.which("wsl.exe") or shutil.which("wsl") or "wsl.exe"
             cmd = [wsl_exe, "bash", "-lc", f"cd {shlex.quote(cwd_w)} && {quoted}"]
             self.run_cmd(cmd, env=env)
             return
@@ -1158,6 +1170,16 @@ class App(tk.Tk):
                     bash = [git_bash]
             except Exception as e:
                 self.log(f"Automatic Git Bash setup failed: {e}")
+        # Convert Windows paths for Git Bash/MSYS when needed
+        if os.name == "nt" and bash and len(bash) == 1:
+            bash_exe = str(bash[0]).lower().replace('/', '\\')
+            if 'git' in bash_exe and bash_exe.endswith('bash.exe'):
+                # Git Bash can generally handle Windows paths, but normalize to forward slashes
+                script_arg = str(script).replace('\\', '/')
+                cwd_run = cwd
+                args_run = [str(a).replace('\\', '/') if (isinstance(a, (str, Path)) and re.match(r'^[A-Za-z]:[\\/]', str(a))) else str(a) for a in args]
+                self.run_cmd(bash + [script_arg] + args_run, cwd=cwd_run, env=env)
+                return
 
         self.run_cmd(bash + [str(script)] + [str(a) for a in args], cwd=cwd, env=env)
 
